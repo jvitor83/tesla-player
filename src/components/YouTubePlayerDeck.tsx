@@ -447,14 +447,10 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             type="button"
             className="touch-pill-btn"
             onClick={onToggleHardwareProfile}
-            title="Alternar otimização de decodificação de hardware entre MCU2 (Intel Atom 720p) e MCU3 (AMD Ryzen 1080p)"
+            title="Alternar resolução entre 720p (MCU2 Atom) e 1080p (MCU3 Ryzen)"
           >
-            <Cpu size={18} />
-            <span>
-              {hardwareProfile === 'MCU2_ATOM'
-                ? 'MCU2 Atom · 720p Leve'
-                : 'MCU3 Ryzen · 1080p HD'}
-            </span>
+            <Cpu size={14} />
+            <span>{hardwareProfile === 'MCU2_ATOM' ? '720p' : '1080p'}</span>
           </button>
 
           <button
@@ -465,10 +461,10 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
               userPausedRef.current = false;
               forceVideoDecoderResync(false);
             }}
-            title="Força a recarga imediata do decodificador de vídeo no segundo atual caso a imagem congele ao engatar Drive"
+            title="Destravar e sincronizar quadro de vídeo no segundo atual"
           >
-            <RefreshCw size={17} />
-            <span>Destravar Vídeo (Sync)</span>
+            <RefreshCw size={14} />
+            <span>Destravar</span>
           </button>
         </div>
 
@@ -480,14 +476,10 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
               isViewportMaximized ? 'touch-pill-btn--danger' : ''
             }`}
             onClick={onToggleViewportMaximize}
-            title="Maximiza via CSS ocupando 100% da janela útil do navegador sem acionar o modo Tesla Theater nativo"
+            title="Maximiza via CSS ocupando 100% da janela útil do navegador"
           >
-            {isViewportMaximized ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-            <span>
-              {isViewportMaximized
-                ? 'Reduzir Viewport (Esc)'
-                : 'Maximizar Viewport 100% (CSS)'}
-            </span>
+            {isViewportMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            <span>{isViewportMaximized ? 'Reduzir' : 'Maximizar'}</span>
           </button>
         </div>
       </div>
@@ -521,7 +513,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
         />
       </div>
 
-      {/* Large Touch Controls Bar (Minimum 48x48px targets for 15"/17" touchscreen) */}
+      {/* Compact Touch Controls Bar */}
       <div className="player-deck__controls-bar">
         <div className="player-deck__now-playing-info">
           <div className="player-deck__title-row">
@@ -533,11 +525,11 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             <span className="player-deck__channel">{currentVideo.channelTitle}</span>
             {activePlaylistTitle && (
               <span className="player-deck__playlist-badge">
-                Fila: {activePlaylistTitle} ({currentQueueIndex + 1}/{queue.length})
+                {currentQueueIndex + 1}/{queue.length}
               </span>
             )}
             {wakeLockActive && (
-              <span className="player-deck__wakelock-tag">WakeLock Ativo</span>
+              <span className="player-deck__wakelock-tag">WakeLock</span>
             )}
           </div>
         </div>
@@ -551,7 +543,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Vídeo anterior da playlist"
             title="Vídeo Anterior"
           >
-            <SkipBack size={22} />
+            <SkipBack size={16} />
           </button>
 
           <button
@@ -562,7 +554,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Retroceder 15 segundos"
             title="-15 segundos"
           >
-            <RotateCcw size={20} />
+            <RotateCcw size={15} />
             <span className="transport-btn__sub">-15s</span>
           </button>
 
@@ -574,7 +566,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label={isPlaying ? 'Pausar vídeo' : 'Reproduzir vídeo'}
             title={isPlaying ? 'Pausar' : 'Reproduzir'}
           >
-            {isPlaying ? <Pause size={24} /> : <Play size={24} />}
+            {isPlaying ? <Pause size={18} /> : <Play size={18} />}
           </button>
 
           <button
@@ -585,7 +577,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Avançar 15 segundos"
             title="+15 segundos"
           >
-            <RotateCw size={20} />
+            <RotateCw size={15} />
             <span className="transport-btn__sub">+15s</span>
           </button>
 
@@ -597,7 +589,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Próximo vídeo da playlist"
             title="Próximo Vídeo"
           >
-            <SkipForward size={22} />
+            <SkipForward size={16} />
           </button>
         </div>
 
@@ -610,7 +602,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label={isMuted ? 'Ativar som' : 'Silenciar'}
             title={isMuted ? 'Ativar Som' : 'Silenciar'}
           >
-            {isMuted ? <VolumeX size={21} /> : <Volume2 size={21} />}
+            {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
           </button>
 
           <button
@@ -621,7 +613,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Salvar nos vídeos com Gostei"
             title="Marcar com Gostei na Biblioteca"
           >
-            <Heart size={20} fill={isLiked ? 'currentColor' : 'none'} />
+            <Heart size={16} fill={isLiked ? 'currentColor' : 'none'} />
           </button>
 
           <button
@@ -632,11 +624,11 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Alternar reprodução contínua da playlist"
             title={
               autoContinuousPlay
-                ? 'Reprodução Contínua de Playlist: Ligada'
-                : 'Reprodução Contínua de Playlist: Desligada'
+                ? 'Reprodução Contínua: Ligada'
+                : 'Reprodução Contínua: Desligada'
             }
           >
-            <Repeat size={20} />
+            <Repeat size={16} />
           </button>
 
           <button
@@ -647,7 +639,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             aria-label="Exibir fila de reprodução"
             title="Fila da Playlist"
           >
-            <ListMusic size={21} />
+            <ListMusic size={16} />
             <span className="transport-btn__badge">{queue.length}</span>
           </button>
 
@@ -657,9 +649,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             target="_blank"
             rel="noreferrer"
             className="transport-btn"
-            title="Abrir stream /embed direto em nova aba se necessário"
+            title="Abrir stream /embed direto em nova aba"
           >
-            <ExternalLink size={19} />
+            <ExternalLink size={15} />
           </a>
         </div>
       </div>

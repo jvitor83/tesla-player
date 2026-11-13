@@ -97,13 +97,13 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
       <header className="yt-panel__header">
         <form onSubmit={handleFormSubmit} className="yt-search-form">
           <div className="yt-search-form__input-wrap">
-            <Search size={20} className="yt-search-form__icon" />
+            <Search size={16} className="yt-search-form__icon" />
             <input
               id="input-youtube-search"
               type="search"
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Buscar no YouTube ou colar link / ID do vídeo..."
+              placeholder="Buscar vídeo ou colar link..."
               className="yt-search-form__input"
               aria-label="Buscar vídeos ou colar URL do YouTube"
             />
@@ -114,7 +114,7 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
             className="tesla-btn tesla-btn--primary yt-search-form__btn"
             disabled={isLoadingApi}
           >
-            {isLoadingApi ? <RefreshCw size={18} className="spin-icon" /> : <Search size={18} />}
+            {isLoadingApi ? <RefreshCw size={15} className="spin-icon" /> : <Search size={15} />}
             <span>Buscar</span>
           </button>
         </form>
@@ -137,7 +137,7 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
               <div className="auth-profile-pill__meta">
                 <strong>{userProfile.name}</strong>
                 <span>
-                  <CheckCircle2 size={12} /> youtube.readonly
+                  <CheckCircle2 size={11} /> OAuth
                 </span>
               </div>
               <button
@@ -145,9 +145,9 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
                 type="button"
                 className="transport-btn"
                 onClick={onSyncUserData}
-                title="Atualizar playlists.list e Biblioteca via YouTube Data API v3"
+                title="Atualizar playlists e Biblioteca via YouTube Data API v3"
               >
-                <RefreshCw size={18} className={isLoadingApi ? 'spin-icon' : ''} />
+                <RefreshCw size={15} className={isLoadingApi ? 'spin-icon' : ''} />
               </button>
             </div>
           ) : (
@@ -156,10 +156,10 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
               type="button"
               className="tesla-btn tesla-btn--oauth"
               onClick={onTriggerGoogleLogin}
-              title="Autenticar via Google Identity Services com escopo youtube.readonly"
+              title="Autenticar via Google Identity Services"
             >
-              <LogIn size={19} />
-              <span>Login Google OAuth</span>
+              <LogIn size={15} />
+              <span>Login</span>
             </button>
           )}
 
@@ -171,12 +171,12 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
             title="Configurar Client ID OAuth 2.0 e Chave da YouTube Data API v3"
             aria-label="Configurações da Nuvem"
           >
-            <Settings size={20} />
+            <Settings size={16} />
           </button>
         </div>
       </header>
 
-      {/* Primary Module Tabs (Minimum 48x48px touch targets) */}
+      {/* Primary Module Tabs */}
       <div className="yt-tabs" role="tablist" aria-label="Abas do Módulo YouTube">
         <button
           id="tab-yt-home"
@@ -186,8 +186,8 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
           className={`yt-tab-btn ${activeTab === 'home' ? 'yt-tab-btn--active' : ''}`}
           onClick={() => onSelectTab('home')}
         >
-          <Compass size={20} />
-          <span>Explorar &amp; Busca</span>
+          <Compass size={16} />
+          <span>Início</span>
         </button>
 
         <button
@@ -198,7 +198,7 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
           className={`yt-tab-btn ${activeTab === 'playlists' ? 'yt-tab-btn--active' : ''}`}
           onClick={() => onSelectTab('playlists')}
         >
-          <ListVideo size={20} />
+          <ListVideo size={16} />
           <span>Playlists ({playlists.length})</span>
         </button>
 
@@ -210,8 +210,8 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
           className={`yt-tab-btn ${activeTab === 'library' ? 'yt-tab-btn--active' : ''}`}
           onClick={() => onSelectTab('library')}
         >
-          <Library size={20} />
-          <span>Biblioteca ({likedVideos.length + watchHistory.length})</span>
+          <Library size={16} />
+          <span>Biblioteca</span>
         </button>
 
         <button
@@ -222,8 +222,8 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
           className={`yt-tab-btn ${activeTab === 'subscriptions' ? 'yt-tab-btn--active' : ''}`}
           onClick={() => onSelectTab('subscriptions')}
         >
-          <Users size={20} />
-          <span>Inscrições ({subscriptions.length})</span>
+          <Users size={16} />
+          <span>Inscrições</span>
         </button>
       </div>
 
