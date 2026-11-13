@@ -12,19 +12,14 @@ import {
   Minimize2,
   Cpu,
   ListMusic,
-  ShieldAlert,
-  EyeOff,
-  Eye,
   Heart,
   ExternalLink,
-  CheckCircle2,
   Repeat,
 } from 'lucide-react';
 import type {
   YouTubeVideo,
   HardwareProfile,
   ResolutionQuality,
-  DrivingState,
 } from '../types/tesla';
 
 declare global {
@@ -81,7 +76,6 @@ interface YouTubePlayerDeckProps {
   activePlaylistTitle?: string;
   hardwareProfile: HardwareProfile;
   resolution: ResolutionQuality;
-  drivingState: DrivingState;
   isViewportMaximized: boolean;
   isLiked: boolean;
   onToggleViewportMaximize: () => void;
@@ -99,7 +93,6 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   activePlaylistTitle,
   hardwareProfile,
   resolution,
-  drivingState,
   isViewportMaximized,
   isLiked,
   onToggleViewportMaximize,
@@ -114,10 +107,8 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [autoContinuousPlay, setAutoContinuousPlay] = useState<boolean>(true);
-  const [passengerFocusShield, setPassengerFocusShield] = useState<boolean>(false);
   const [showQueueDrawer, setShowQueueDrawer] = useState<boolean>(false);
   const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
-  const [keepAliveGuard, setKeepAliveGuard] = useState<boolean>(true);
   const [apiReady, setApiReady] = useState<boolean>(Boolean(window.YT?.Player));
 
   const onNextVideoRef = useRef(onNextVideo);
@@ -302,16 +293,11 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     <section
       id="tesla-youtube-player-deck"
       className={`player-deck ${isViewportMaximized ? 'player-deck--maximized' : ''}`}
-      aria-label="Reprodutor Integrado YouTube IFrame API"
+      aria-label="Reprodutor Integrado YouTube"
     >
-      {/* Top Status & Viewport Bar inside Maximized Mode or Standard Header */}
+      {/* Top Status & Viewport Bar */}
       <div className="player-deck__topbar">
         <div className="player-deck__meta-badge-group">
-          <span className="status-chip status-chip--live">
-            <span className="status-chip__dot" />
-            IFrame API /embed/{currentVideo.id}
-          </span>
-
           <button
             id="btn-toggle-mcu-profile"
             type="button"
@@ -326,33 +312,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
                 : 'MCU3 Ryzen · 1080p HD'}
             </span>
           </button>
-
-          <button
-            id="btn-toggle-keepalive"
-            type="button"
-            className={`touch-pill-btn ${keepAliveGuard ? 'touch-pill-btn--active' : ''}`}
-            onClick={() => setKeepAliveGuard((v) => !v)}
-            title="Proteção de áudio e retomada em caso de pausa do firmware ao engatar Drive"
-          >
-            <CheckCircle2 size={17} />
-            <span>
-              {keepAliveGuard ? 'Drive Audio Guard: Ativo' : 'Drive Audio Guard: Off'}
-            </span>
-          </button>
         </div>
 
         <div className="player-deck__top-actions">
-          <button
-            id="btn-passenger-focus-mode"
-            type="button"
-            className={`touch-pill-btn ${passengerFocusShield ? 'touch-pill-btn--warning' : ''}`}
-            onClick={() => setPassengerFocusShield((v) => !v)}
-            title="Oculta o quadro de vídeo mantendo o áudio ativo para evitar distração visual do motorista"
-          >
-            {passengerFocusShield ? <Eye size={18} /> : <EyeOff size={18} />}
-            <span>{passengerFocusShield ? 'Mostrar Vídeo' : 'Modo Só Áudio'}</span>
-          </button>
-
           <button
             id="btn-maximize-css-viewport"
             type="button"
@@ -389,35 +351,6 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
           />
-        )}
-
-        {/* Passenger / Driver Focus Audio-Only Shield */}
-        {passengerFocusShield && (
-          <div className="player-deck__audio-shield">
-            <div className="player-deck__audio-shield-card">
-              <ShieldAlert size={36} className="text-accent-red" />
-              <h3>Modo Foco na Condução (Áudio Ativo)</h3>
-              <p>
-                A imagem foi escurecida para segurança do motorista em movimento (modo{' '}
-                <strong>{drivingState}</strong>). O stream de áudio permanece ativo em
-                segundo plano.
-              </p>
-              <div className="player-deck__audio-nowplaying">
-                <span>Reproduzindo agora:</span>
-                <strong>{currentVideo.title}</strong>
-                <small>{currentVideo.channelTitle}</small>
-              </div>
-              <button
-                id="btn-restore-video-passenger"
-                type="button"
-                className="tesla-btn tesla-btn--primary"
-                onClick={() => setPassengerFocusShield(false)}
-              >
-                <Eye size={20} />
-                <span>Sou Passageiro — Exibir Vídeo</span>
-              </button>
-            </div>
-          </div>
         )}
       </div>
 

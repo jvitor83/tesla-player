@@ -3,7 +3,6 @@ import type {
   ModuleId,
   YoutubeTabId,
   HardwareProfile,
-  DrivingState,
   YouTubeVideo,
   YouTubePlaylist,
   YouTubeSubscription,
@@ -31,7 +30,6 @@ import { YouTubePlayerDeck } from './components/YouTubePlayerDeck';
 import { YouTubeModulePanel } from './components/YouTubeModulePanel';
 import { ReservedModuleView } from './components/ReservedModuleView';
 import { RoadmapAndCloudView } from './components/RoadmapAndCloudView';
-import { SafetyAndFirmwareModal } from './components/SafetyAndFirmwareModal';
 
 const STORAGE_KEYS = {
   CLOUD_CONFIG: 'tesla_play_cloud_config_v1',
@@ -42,12 +40,10 @@ const STORAGE_KEYS = {
 };
 
 export function App() {
-  // Navigation & Vehicle State
+  // Navigation State (Drive mode is always standard)
   const [activeModule, setActiveModule] = useState<ModuleId>('youtube');
   const [activeYoutubeTab, setActiveYoutubeTab] = useState<YoutubeTabId>('home');
-  const [drivingState, setDrivingState] = useState<DrivingState>('PARK');
   const [isViewportMaximized, setIsViewportMaximized] = useState<boolean>(false);
-  const [isSafetyModalOpen, setIsSafetyModalOpen] = useState<boolean>(false);
 
   // Hardware Optimization Profile (MCU2 Atom 720p vs MCU3 Ryzen 1080p)
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile>(() => {
@@ -141,12 +137,6 @@ export function App() {
   // API Loading & Status Feedback
   const [isLoadingApi, setIsLoadingApi] = useState<boolean>(false);
   const [apiStatusBanner, setApiStatusBanner] = useState<string | null>(null);
-
-  // Persist hardware profile
-  const handleSelectHardwareProfile = useCallback((profile: HardwareProfile) => {
-    setHardwareProfile(profile);
-    localStorage.setItem(STORAGE_KEYS.HARDWARE_PROFILE, profile);
-  }, []);
 
   const handleToggleHardwareProfile = useCallback(() => {
     setHardwareProfile((prev) => {
@@ -250,7 +240,6 @@ export function App() {
         userPlaylists.status === 'fulfilled' &&
         userPlaylists.value.length > 0
       ) {
-        // Also fetch playlistItems.list for the first playlist automatically
         const firstPl = userPlaylists.value[0];
         try {
           const firstItems = await fetchPlaylistItems(firstPl.id, accessToken);
@@ -388,7 +377,7 @@ export function App() {
         setIsLoadingApi(false);
       }
     },
-    [userProfile?.accessToken, cloudConfig.youtubeApiKey, handleSelectVideo]
+    [userProfile, cloudConfig.youtubeApiKey, handleSelectVideo]
   );
 
   // Load any custom YouTube Playlist ID via playlistItems.list
@@ -446,7 +435,7 @@ export function App() {
         setIsLoadingApi(false);
       }
     },
-    [userProfile?.accessToken, cloudConfig.youtubeApiKey, handleSelectVideo]
+    [userProfile, cloudConfig.youtubeApiKey, handleSelectVideo]
   );
 
   // Search Videos or Direct Video URL / ID
@@ -484,7 +473,6 @@ export function App() {
 
       setActiveYoutubeTab('home');
 
-      // If OAuth token or API key is configured, query official YouTube Data API v3 search.list
       if (userProfile?.accessToken || cloudConfig.youtubeApiKey) {
         setIsLoadingApi(true);
         setApiStatusBanner(`Buscando "${trimmed}" na YouTube Data API v3...`);
@@ -510,7 +498,6 @@ export function App() {
         }
       }
 
-      // Local catalog smart filter fallback
       const lower = trimmed.toLowerCase();
       const filtered = DEFAULT_FEATURED_VIDEOS.filter(
         (v) =>
@@ -529,12 +516,12 @@ export function App() {
       } else {
         setVideos(DEFAULT_FEATURED_VIDEOS);
         setApiStatusBanner(
-          `Dica: Cole qualquer link ou ID de vídeo do YouTube na busca para tocá-lo imediatamente, ou configure sua API Key em "Cloud & Guia".`
+          `Dica: Cole qualquer link ou ID de vídeo do YouTube na busca para tocá-lo imediatamente, ou configure sua API Key nas configurações.`
         );
       }
     },
     [
-      userProfile?.accessToken,
+      userProfile,
       cloudConfig.youtubeApiKey,
       handleSelectVideo,
       queue,
@@ -577,7 +564,7 @@ export function App() {
       setVideos(list);
       handleSelectVideo(list[0], list, sub.title);
     },
-    [userProfile?.accessToken, cloudConfig.youtubeApiKey, handleSelectVideo]
+    [userProfile, cloudConfig.youtubeApiKey, handleSelectVideo]
   );
 
   // Save Cloud Config
@@ -590,57 +577,18 @@ export function App() {
 
   return (
     <div
-      className={`tesla-shell ${
+      className={`tesla-shell tesla-shell--drive-active ${
         hardwareProfile === 'MCU2_ATOM' ? 'tesla-shell--mcu2-eco' : ''
-      } ${drivingState === 'DRIVE' ? 'tesla-shell--drive-active' : ''}`}
+      }`}
     >
-      {/* 4) Menu Lateral Fixo (Dock) */}
+      {/* Left Navigation Dock (YouTube & More soon) */}
       <TeslaDock
         activeModule={activeModule}
-        drivingState={drivingState}
-        isAuthenticated={Boolean(userProfile)}
         onSelectModule={(mod) => setActiveModule(mod)}
-        onToggleDrivingState={() =>
-          setDrivingState((prev) => (prev === 'PARK' ? 'DRIVE' : 'PARK'))
-        }
-        onOpenSafetyModal={() => setIsSafetyModalOpen(true)}
       />
 
       {/* Main Content Workspace */}
       <main className="tesla-workspace">
-        {/* Top Automotive Telemetry & Status Strip */}
-        <div className="tesla-statusbar">
-          <div className="tesla-statusbar__left">
-            <span
-              className={`drive-mode-indicator ${
-                drivingState === 'DRIVE'
-                  ? 'drive-mode-indicator--drive'
-                  : 'drive-mode-indicator--park'
-              }`}
-            >
-              {drivingState === 'PARK'
-                ? 'ESTACIONADO (PARK)'
-                : 'EM MOVIMENTO (DRIVE · CSS VIEWPORT ATIVA)'}
-            </span>
-            <span className="statusbar-divider">•</span>
-            <span className="statusbar-note">
-              Passageiros: Reprodução contínua via YouTube IFrame API sem bloqueio
-              X-Frame-Options
-            </span>
-          </div>
-
-          <div className="tesla-statusbar__right">
-            <span className="statusbar-tag">
-              HTTPS OAuth 2.0
-            </span>
-            <span className="statusbar-tag">
-              {hardwareProfile === 'MCU2_ATOM'
-                ? 'MCU2 Atom · 720p'
-                : 'MCU3 Ryzen · 1080p'}
-            </span>
-          </div>
-        </div>
-
         {/* Active Module: YouTube (Split Cockpit or CSS Full Viewport) */}
         {activeModule === 'youtube' && (
           <div className="youtube-cockpit-grid">
@@ -651,7 +599,6 @@ export function App() {
               activePlaylistTitle={activePlaylistTitle}
               hardwareProfile={hardwareProfile}
               resolution={resolution}
-              drivingState={drivingState}
               isViewportMaximized={isViewportMaximized}
               isLiked={isCurrentVideoLiked}
               onToggleViewportMaximize={() =>
@@ -699,13 +646,9 @@ export function App() {
           </div>
         )}
 
-        {/* Reserved Future Modules: IPTV, Plex, Games, Radio ("Em breve") */}
-        {(activeModule === 'iptv' ||
-          activeModule === 'plex' ||
-          activeModule === 'games' ||
-          activeModule === 'radio') && (
+        {/* More Soon Modules View */}
+        {activeModule === 'more_soon' && (
           <ReservedModuleView
-            moduleId={activeModule}
             onReturnToYoutube={() => setActiveModule('youtube')}
             onOpenRoadmap={() => setActiveModule('roadmap')}
           />
@@ -724,15 +667,6 @@ export function App() {
           />
         )}
       </main>
-
-      {/* Firmware, Viewport & Passenger Legal Responsibility Modal */}
-      <SafetyAndFirmwareModal
-        isOpen={isSafetyModalOpen}
-        hardwareProfile={hardwareProfile}
-        drivingState={drivingState}
-        onClose={() => setIsSafetyModalOpen(false)}
-        onSelectHardwareProfile={handleSelectHardwareProfile}
-      />
     </div>
   );
 }

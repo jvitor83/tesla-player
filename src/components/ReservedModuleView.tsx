@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Tv,
   Server,
@@ -11,24 +11,34 @@ import {
   Layers,
   MapPin,
 } from 'lucide-react';
-import type { ModuleId, ReservedModuleSpec } from '../types/tesla';
+import type { ReservedModuleSpec } from '../types/tesla';
 import { RESERVED_MODULES } from '../data/mockYoutubeData';
 
 interface ReservedModuleViewProps {
-  moduleId: Exclude<ModuleId, 'youtube' | 'roadmap'>;
   onReturnToYoutube: () => void;
   onOpenRoadmap: () => void;
 }
 
 export const ReservedModuleView: React.FC<ReservedModuleViewProps> = ({
-  moduleId,
   onReturnToYoutube,
   onOpenRoadmap,
 }) => {
-  const spec: ReservedModuleSpec = RESERVED_MODULES[moduleId];
+  const [selectedId, setSelectedId] = useState<'iptv' | 'plex' | 'games' | 'radio'>('iptv');
+  const spec: ReservedModuleSpec = RESERVED_MODULES[selectedId];
+
+  const moduleOptions: Array<{
+    id: 'iptv' | 'plex' | 'games' | 'radio';
+    label: string;
+    icon: React.ReactNode;
+  }> = [
+    { id: 'iptv', label: 'IPTV / TV', icon: <Tv size={20} /> },
+    { id: 'plex', label: 'Plex Server', icon: <Server size={20} /> },
+    { id: 'games', label: 'Jogos Web', icon: <Gamepad2 size={20} /> },
+    { id: 'radio', label: 'Rádios FM', icon: <Radio size={20} /> },
+  ];
 
   const renderIcon = () => {
-    switch (moduleId) {
+    switch (selectedId) {
       case 'iptv':
         return <Tv size={40} />;
       case 'plex':
@@ -42,11 +52,28 @@ export const ReservedModuleView: React.FC<ReservedModuleViewProps> = ({
 
   return (
     <section
-      id={`reserved-module-${moduleId}`}
+      id="reserved-module-more-soon"
       className="reserved-module-view"
-      aria-label={`Módulo Reservado: ${spec.title}`}
+      aria-label="Módulos Futuros: More Soon"
     >
       <div className="reserved-module-view__card">
+        <div className="yt-library-toggles">
+          {moduleOptions.map((opt) => (
+            <button
+              key={opt.id}
+              id={`btn-soon-${opt.id}`}
+              type="button"
+              className={`touch-pill-btn ${
+                selectedId === opt.id ? 'touch-pill-btn--primary' : ''
+              }`}
+              onClick={() => setSelectedId(opt.id)}
+            >
+              {opt.icon}
+              <span>{opt.label}</span>
+            </button>
+          ))}
+        </div>
+
         <div className="reserved-module-view__header">
           <div className="reserved-module-view__icon-box">{renderIcon()}</div>
           <div className="reserved-module-view__titles">
@@ -119,7 +146,7 @@ export const ReservedModuleView: React.FC<ReservedModuleViewProps> = ({
             className="tesla-btn tesla-btn--secondary"
             onClick={onOpenRoadmap}
           >
-            <span>Ver Roteiro de Desenvolvimento (Roadmap)</span>
+            <span>Configurações Google Cloud &amp; Roadmap</span>
           </button>
         </div>
       </div>

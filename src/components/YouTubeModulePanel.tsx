@@ -48,14 +48,6 @@ interface YouTubeModulePanelProps {
   onClearHistory: () => void;
 }
 
-const QUICK_SEARCH_PRESETS = [
-  'Synthwave Night Drive',
-  'Lofi Hip Hop Radio',
-  'Tesla FSD Cybercab',
-  'NASA Live Stream',
-  'Blender 60fps Open Movie',
-];
-
 export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
   activeTab,
   videos,
@@ -183,23 +175,6 @@ export const YouTubeModulePanel: React.FC<YouTubeModulePanelProps> = ({
           </button>
         </div>
       </header>
-
-      {/* Quick Presets Chips */}
-      <div className="yt-quick-chips" aria-label="Sugestões rápidas para toque">
-        {QUICK_SEARCH_PRESETS.map((preset) => (
-          <button
-            key={preset}
-            type="button"
-            className="quick-chip"
-            onClick={() => {
-              setSearchText(preset);
-              onSearchSubmit(preset);
-            }}
-          >
-            {preset}
-          </button>
-        ))}
-      </div>
 
       {/* Primary Module Tabs (Minimum 48x48px touch targets) */}
       <div className="yt-tabs" role="tablist" aria-label="Abas do Módulo YouTube">

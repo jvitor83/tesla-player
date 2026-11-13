@@ -1,12 +1,10 @@
-export type ModuleId = 'youtube' | 'iptv' | 'plex' | 'games' | 'radio' | 'roadmap';
+export type ModuleId = 'youtube' | 'more_soon' | 'roadmap';
 
 export type YoutubeTabId = 'home' | 'playlists' | 'library' | 'subscriptions';
 
 export type HardwareProfile = 'MCU2_ATOM' | 'MCU3_RYZEN';
 
 export type ResolutionQuality = 'hd720' | 'hd1080';
-
-export type DrivingState = 'PARK' | 'DRIVE';
 
 export interface YouTubeVideo {
   id: string;
@@ -52,7 +50,7 @@ export interface CloudConfig {
 }
 
 export interface ReservedModuleSpec {
-  id: Exclude<ModuleId, 'youtube' | 'roadmap'>;
+  id: 'iptv' | 'plex' | 'games' | 'radio';
   title: string;
   subtitle: string;
   badge: string;
