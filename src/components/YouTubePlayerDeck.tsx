@@ -15,12 +15,17 @@ import {
   Heart,
   ExternalLink,
   Repeat,
+  RefreshCw,
 } from 'lucide-react';
 import type {
   YouTubeVideo,
   HardwareProfile,
   ResolutionQuality,
 } from '../types/tesla';
+import {
+  installDriveVideoGuard,
+  activateWebAudioKeepAlive,
+} from '../utils/driveVideoGuard';
 
 declare global {
   interface Window {
@@ -28,6 +33,7 @@ declare global {
       Player: new (
         elementId: string | HTMLElement,
         options: {
+          host?: string;
           videoId: string;
           playerVars?: Record<string, string | number>;
           events?: {
@@ -104,6 +110,10 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
 }) => {
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const playerInstanceRef = useRef<YTPlayerInstance | null>(null);
+  const compositorCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const userPausedRef = useRef<boolean>(false);
+  const lastKnownTimeRef = useRef<number>(0);
+
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [autoContinuousPlay, setAutoContinuousPlay] = useState<boolean>(true);
@@ -113,11 +123,119 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
 
   const onNextVideoRef = useRef(onNextVideo);
   const autoContinuousPlayRef = useRef(autoContinuousPlay);
+  const resolutionRef = useRef(resolution);
 
   useEffect(() => {
     onNextVideoRef.current = onNextVideo;
     autoContinuousPlayRef.current = autoContinuousPlay;
-  }, [onNextVideo, autoContinuousPlay]);
+    resolutionRef.current = resolution;
+  }, [onNextVideo, autoContinuousPlay, resolution]);
+
+  // Force video decoder resync at current timestamp (wakes up frozen video frames in Drive)
+  const forceVideoDecoderResync = useCallback((microNudgeOnly = false) => {
+    const player = playerInstanceRef.current;
+    if (!player || userPausedRef.current) return;
+    try {
+      const currentSec = player.getCurrentTime() || lastKnownTimeRef.current || 0;
+      if (microNudgeOnly) {
+        player.playVideo();
+        if (currentSec > 0) {
+          player.seekTo(currentSec + 0.04, true);
+        }
+      } else {
+        player.loadVideoById({
+          videoId: currentVideo.id,
+          startSeconds: Math.max(0, currentSec),
+          suggestedQuality: resolutionRef.current,
+        });
+        player.playVideo();
+      }
+      setIsPlaying(true);
+    } catch {
+      // ignore if player not ready
+    }
+  }, [currentVideo.id]);
+
+  // Install OS/Browser Drive Video Guard & Network Handover Listener (Wi-Fi -> LTE when leaving garage)
+  useEffect(() => {
+    installDriveVideoGuard(() => {
+      if (!userPausedRef.current) {
+        forceVideoDecoderResync(true);
+      }
+    });
+
+    const handleFirstInteraction = () => {
+      activateWebAudioKeepAlive();
+    };
+    window.addEventListener('pointerdown', handleFirstInteraction, { passive: true });
+
+    const handleNetworkOnline = () => {
+      if (!userPausedRef.current) {
+        forceVideoDecoderResync(false);
+      }
+    };
+    window.addEventListener('online', handleNetworkOnline);
+
+    return () => {
+      window.removeEventListener('pointerdown', handleFirstInteraction);
+      window.removeEventListener('online', handleNetworkOnline);
+    };
+  }, [forceVideoDecoderResync]);
+
+  // Continuous Canvas Compositor Heartbeat:
+  // Forces Chromium / QtWebEngine to invalidate and composite the video stage
+  // as a software/WebGL RGBA texture on every frame instead of promoting to a
+  // hardware video overlay plane (which Tesla's display driver freezes in Drive).
+  useEffect(() => {
+    let rafId = 0;
+    let tick = 0;
+    const canvas = compositorCanvasRef.current;
+    const ctx = canvas ? canvas.getContext('2d') : null;
+
+    const renderHeartbeat = () => {
+      tick = (tick + 1) % 60;
+      if (ctx && canvas) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Draw a 1x1 nearly transparent pixel to keep Chromium's LayerTreeHost damage rect active
+        ctx.fillStyle =
+          tick % 2 === 0
+            ? 'rgba(255, 255, 255, 0.004)'
+            : 'rgba(232, 33, 39, 0.004)';
+        ctx.fillRect(tick % 8, 0, 2, 2);
+      }
+      rafId = window.requestAnimationFrame(renderHeartbeat);
+    };
+
+    rafId = window.requestAnimationFrame(renderHeartbeat);
+    return () => window.cancelAnimationFrame(rafId);
+  }, []);
+
+  // Active 450ms Watchdog for Drive Mode Pause / Frame Stall Recovery
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const player = playerInstanceRef.current;
+      if (!player) return;
+      try {
+        const currentSec = player.getCurrentTime();
+        if (typeof currentSec === 'number' && currentSec > 0) {
+          lastKnownTimeRef.current = currentSec;
+        }
+        const state = player.getPlayerState();
+        // If user did NOT pause, but Tesla OS / Chromium paused the player (state === 2 or 5)
+        if (!userPausedRef.current && (state === 2 || state === 5)) {
+          player.playVideo();
+          if (currentSec > 0) {
+            player.seekTo(currentSec + 0.03, true);
+          }
+          setIsPlaying(true);
+        }
+      } catch {
+        // ignore
+      }
+    }, 450);
+
+    return () => window.clearInterval(interval);
+  }, []);
 
   // Request Screen Wake Lock for continuous playback in Tesla browser
   useEffect(() => {
@@ -172,6 +290,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
       return;
     }
 
+    userPausedRef.current = false;
+    lastKnownTimeRef.current = 0;
+
     if (playerInstanceRef.current) {
       try {
         playerInstanceRef.current.loadVideoById({
@@ -190,6 +311,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     playerContainerRef.current.appendChild(mountNode);
 
     const player = new window.YT.Player(mountNode, {
+      host: 'https://www.youtube-nocookie.com',
       videoId: currentVideo.id,
       playerVars: {
         autoplay: 1,
@@ -222,8 +344,23 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
               // ignore
             }
           } else if (event.data === 2) {
-            setIsPlaying(false);
+            if (!userPausedRef.current) {
+              // External pause triggered by Drive transition: auto-resume immediately
+              try {
+                const t = event.target.getCurrentTime() || 0;
+                event.target.playVideo();
+                if (t > 0) {
+                  event.target.seekTo(t + 0.03, true);
+                }
+                setIsPlaying(true);
+              } catch {
+                setIsPlaying(false);
+              }
+            } else {
+              setIsPlaying(false);
+            }
           } else if (event.data === 0 && autoContinuousPlayRef.current) {
+            userPausedRef.current = false;
             onNextVideoRef.current();
           }
         },
@@ -245,14 +382,19 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   }, [resolution]);
 
   const handleTogglePlay = useCallback(() => {
+    activateWebAudioKeepAlive();
     const player = playerInstanceRef.current;
     if (!player) return;
     try {
       const state = player.getPlayerState();
       if (state === 1) {
+        userPausedRef.current = true;
+        (window as unknown as { __teslaAllowMediaPause?: boolean }).__teslaAllowMediaPause = true;
         player.pauseVideo();
+        (window as unknown as { __teslaAllowMediaPause?: boolean }).__teslaAllowMediaPause = false;
         setIsPlaying(false);
       } else {
+        userPausedRef.current = false;
         player.playVideo();
         setIsPlaying(true);
       }
@@ -267,7 +409,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     try {
       const current = player.getCurrentTime() || 0;
       const target = Math.max(0, current + deltaSeconds);
+      userPausedRef.current = false;
       player.seekTo(target, true);
+      player.playVideo();
     } catch {
       // ignore
     }
@@ -312,6 +456,20 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
                 : 'MCU3 Ryzen · 1080p HD'}
             </span>
           </button>
+
+          <button
+            id="btn-resync-video-stream"
+            type="button"
+            className="touch-pill-btn touch-pill-btn--active"
+            onClick={() => {
+              userPausedRef.current = false;
+              forceVideoDecoderResync(false);
+            }}
+            title="Força a recarga imediata do decodificador de vídeo no segundo atual caso a imagem congele ao engatar Drive"
+          >
+            <RefreshCw size={17} />
+            <span>Destravar Vídeo (Sync)</span>
+          </button>
         </div>
 
         <div className="player-deck__top-actions">
@@ -334,8 +492,8 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
         </div>
       </div>
 
-      {/* Main Video Frame Container */}
-      <div className="player-deck__stage">
+      {/* Main Video Frame Container with Anti-Hardware-Overlay Compositor Force */}
+      <div className="player-deck__stage player-deck__stage--drive-compositor">
         <div
           ref={playerContainerRef}
           className="player-deck__iframe-host"
@@ -346,12 +504,21 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
         {!apiReady && (
           <iframe
             className="player-deck__fallback-iframe"
-            src={`https://www.youtube.com/embed/${currentVideo.id}?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&vq=${resolution}`}
+            src={`https://www.youtube-nocookie.com/embed/${currentVideo.id}?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&vq=${resolution}`}
             title={currentVideo.title}
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
           />
         )}
+
+        {/* Transparent Canvas Heartbeat to prevent Chromium Hardware Video Overlay freeze in Drive */}
+        <canvas
+          ref={compositorCanvasRef}
+          width={16}
+          height={16}
+          className="player-deck__compositor-canvas"
+          aria-hidden="true"
+        />
       </div>
 
       {/* Large Touch Controls Bar (Minimum 48x48px targets for 15"/17" touchscreen) */}
@@ -486,7 +653,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
 
           <a
             id="link-open-embed-tab"
-            href={`https://www.youtube.com/embed/${currentVideo.id}?autoplay=1`}
+            href={`https://www.youtube-nocookie.com/embed/${currentVideo.id}?autoplay=1`}
             target="_blank"
             rel="noreferrer"
             className="transport-btn"
