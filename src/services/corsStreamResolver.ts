@@ -460,7 +460,7 @@ export async function resolveCorsStreamsForVideo(
     if (cfWorkerUrl) {
       try {
         logs.push(`Consultando Cloudflare Worker Gateway: ${cfWorkerUrl}/info?id=${normalizedId}`);
-        const cfRes = await fetchWithTimeout(`${cfWorkerUrl}/info?id=${normalizedId}`, 6000, {
+        const cfRes = await fetchWithTimeout(`${cfWorkerUrl}/info?id=${normalizedId}`, 15000, {
           headers: { Accept: 'application/json' },
         });
         if (cfRes.ok) {

@@ -116,6 +116,22 @@ export default {
   },
 };
 
+async function fetchWithTimeout(url, timeoutMs = 4000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+      },
+    });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 /**
  * Resolves video streams from multiple high-availability upstreams:
  * 1. Piped & Invidious public backends with local=true
@@ -129,17 +145,9 @@ async function resolveStreamForVideo(videoId, origin) {
     { type: 'invidious', url: `https://invidious.nerdvpn.de/api/v1/videos/${videoId}` },
   ];
 
-  let lastError = null;
-
   for (const upstream of upstreams) {
     try {
-      const res = await fetch(upstream.url, {
-        headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        },
-      });
-
+      const res = await fetchWithTimeout(upstream.url, 3500);
       if (!res.ok) continue;
       const data = await res.json();
 
