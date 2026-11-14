@@ -6,13 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "lint": "oxlint --ignore-pattern 'public/ogv/**'",
     "preview": "vite preview"
   },
   "dependencies": {
     "lucide-react": "^1.72.0",
+    "mp4box": "^2.5.0",
+    "ogv": "^1.9.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "tinyh264": "^0.0.7"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",

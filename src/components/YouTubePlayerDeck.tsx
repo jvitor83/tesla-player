@@ -16,16 +16,25 @@ import {
   ExternalLink,
   Repeat,
   RefreshCw,
+  Layers,
+  Globe,
+  MonitorPlay,
 } from 'lucide-react';
 import type {
   YouTubeVideo,
   HardwareProfile,
   ResolutionQuality,
+  PlaybackMode,
 } from '../types/tesla';
 import {
   installDriveVideoGuard,
   activateWebAudioKeepAlive,
 } from '../utils/driveVideoGuard';
+import {
+  LocalModeCanvasPlayer,
+  type CanvasPlayerHandle,
+} from './LocalModeCanvasPlayer';
+import { ExternalModeCanvasPlayer } from './ExternalModeCanvasPlayer';
 
 declare global {
   interface Window {
@@ -38,7 +47,10 @@ declare global {
           playerVars?: Record<string, string | number>;
           events?: {
             onReady?: (event: { target: YTPlayerInstance }) => void;
-            onStateChange?: (event: { data: number; target: YTPlayerInstance }) => void;
+            onStateChange?: (event: {
+              data: number;
+              target: YTPlayerInstance;
+            }) => void;
             onError?: (event: { data: number }) => void;
           };
         }
@@ -92,6 +104,8 @@ interface YouTubePlayerDeckProps {
   onToggleLike: (video: YouTubeVideo) => void;
 }
 
+const PLAYBACK_MODE_STORAGE_KEY = 'tesla_play_playback_mode_v1';
+
 export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   currentVideo,
   queue,
@@ -110,9 +124,18 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
 }) => {
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const playerInstanceRef = useRef<YTPlayerInstance | null>(null);
+  const canvasPlayerRef = useRef<CanvasPlayerHandle | null>(null);
   const compositorCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const userPausedRef = useRef<boolean>(false);
   const lastKnownTimeRef = useRef<number>(0);
+
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(() => {
+    const saved = localStorage.getItem(PLAYBACK_MODE_STORAGE_KEY);
+    if (saved === 'local' || saved === 'external' || saved === 'iframe') {
+      return saved;
+    }
+    return 'local';
+  });
 
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -124,39 +147,67 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   const onNextVideoRef = useRef(onNextVideo);
   const autoContinuousPlayRef = useRef(autoContinuousPlay);
   const resolutionRef = useRef(resolution);
+  const playbackModeRef = useRef(playbackMode);
 
   useEffect(() => {
     onNextVideoRef.current = onNextVideo;
     autoContinuousPlayRef.current = autoContinuousPlay;
     resolutionRef.current = resolution;
-  }, [onNextVideo, autoContinuousPlay, resolution]);
+    playbackModeRef.current = playbackMode;
+  }, [onNextVideo, autoContinuousPlay, resolution, playbackMode]);
 
-  // Force video decoder resync at current timestamp (wakes up frozen video frames in Drive)
-  const forceVideoDecoderResync = useCallback((microNudgeOnly = false) => {
-    const player = playerInstanceRef.current;
-    if (!player || userPausedRef.current) return;
-    try {
-      const currentSec = player.getCurrentTime() || lastKnownTimeRef.current || 0;
-      if (microNudgeOnly) {
-        player.playVideo();
-        if (currentSec > 0) {
-          player.seekTo(currentSec + 0.04, true);
-        }
-      } else {
-        player.loadVideoById({
-          videoId: currentVideo.id,
-          startSeconds: Math.max(0, currentSec),
-          suggestedQuality: resolutionRef.current,
-        });
-        player.playVideo();
+  const handleSelectPlaybackMode = useCallback((mode: PlaybackMode) => {
+    // If leaving iframe mode, destroy YT instance cleanly
+    if (mode !== 'iframe' && playerInstanceRef.current) {
+      try {
+        playerInstanceRef.current.destroy();
+      } catch {
+        // ignore
       }
-      setIsPlaying(true);
-    } catch {
-      // ignore if player not ready
+      playerInstanceRef.current = null;
     }
-  }, [currentVideo.id]);
+    setPlaybackMode(mode);
+    localStorage.setItem(PLAYBACK_MODE_STORAGE_KEY, mode);
+    userPausedRef.current = false;
+    setIsPlaying(true);
+  }, []);
 
-  // Install OS/Browser Drive Video Guard & Network Handover Listener (Wi-Fi -> LTE when leaving garage)
+  // Force video decoder resync at current timestamp
+  const forceVideoDecoderResync = useCallback(
+    (microNudgeOnly = false) => {
+      if (playbackModeRef.current !== 'iframe') {
+        canvasPlayerRef.current?.resync();
+        setIsPlaying(true);
+        return;
+      }
+
+      const player = playerInstanceRef.current;
+      if (!player || userPausedRef.current) return;
+      try {
+        const currentSec =
+          player.getCurrentTime() || lastKnownTimeRef.current || 0;
+        if (microNudgeOnly) {
+          player.playVideo();
+          if (currentSec > 0) {
+            player.seekTo(currentSec + 0.04, true);
+          }
+        } else {
+          player.loadVideoById({
+            videoId: currentVideo.id,
+            startSeconds: Math.max(0, currentSec),
+            suggestedQuality: resolutionRef.current,
+          });
+          player.playVideo();
+        }
+        setIsPlaying(true);
+      } catch {
+        // ignore if player not ready
+      }
+    },
+    [currentVideo.id]
+  );
+
+  // Install OS/Browser Drive Video Guard & Network Handover Listener
   useEffect(() => {
     installDriveVideoGuard(() => {
       if (!userPausedRef.current) {
@@ -167,7 +218,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     const handleFirstInteraction = () => {
       activateWebAudioKeepAlive();
     };
-    window.addEventListener('pointerdown', handleFirstInteraction, { passive: true });
+    window.addEventListener('pointerdown', handleFirstInteraction, {
+      passive: true,
+    });
 
     const handleNetworkOnline = () => {
       if (!userPausedRef.current) {
@@ -182,10 +235,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     };
   }, [forceVideoDecoderResync]);
 
-  // Continuous Canvas Compositor Heartbeat:
-  // Forces Chromium / QtWebEngine to invalidate and composite the video stage
-  // as a software/WebGL RGBA texture on every frame instead of promoting to a
-  // hardware video overlay plane (which Tesla's display driver freezes in Drive).
+  // Continuous Canvas Compositor Heartbeat
   useEffect(() => {
     let rafId = 0;
     let tick = 0;
@@ -196,7 +246,6 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
       tick = (tick + 1) % 60;
       if (ctx && canvas) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        // Draw a 1x1 nearly transparent pixel to keep Chromium's LayerTreeHost damage rect active
         ctx.fillStyle =
           tick % 2 === 0
             ? 'rgba(255, 255, 255, 0.004)'
@@ -210,8 +259,10 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     return () => window.cancelAnimationFrame(rafId);
   }, []);
 
-  // Active 450ms Watchdog for Drive Mode Pause / Frame Stall Recovery
+  // Active 450ms Watchdog for IFrame Mode
   useEffect(() => {
+    if (playbackMode !== 'iframe') return;
+
     const interval = window.setInterval(() => {
       const player = playerInstanceRef.current;
       if (!player) return;
@@ -221,7 +272,6 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
           lastKnownTimeRef.current = currentSec;
         }
         const state = player.getPlayerState();
-        // If user did NOT pause, but Tesla OS / Chromium paused the player (state === 2 or 5)
         if (!userPausedRef.current && (state === 2 || state === 5)) {
           player.playVideo();
           if (currentSec > 0) {
@@ -235,7 +285,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     }, 450);
 
     return () => window.clearInterval(interval);
-  }, []);
+  }, [playbackMode]);
 
   // Request Screen Wake Lock for continuous playback in Tesla browser
   useEffect(() => {
@@ -284,9 +334,14 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     };
   }, []);
 
-  // Initialize YT.Player instance
+  // Initialize YT.Player instance when in IFrame mode
   useEffect(() => {
-    if (!apiReady || !playerContainerRef.current || !window.YT?.Player) {
+    if (
+      playbackMode !== 'iframe' ||
+      !apiReady ||
+      !playerContainerRef.current ||
+      !window.YT?.Player
+    ) {
       return;
     }
 
@@ -335,7 +390,6 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
           }
         },
         onStateChange: (event) => {
-          // 1 = PLAYING, 2 = PAUSED, 0 = ENDED
           if (event.data === 1) {
             setIsPlaying(true);
             try {
@@ -345,7 +399,6 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             }
           } else if (event.data === 2) {
             if (!userPausedRef.current) {
-              // External pause triggered by Drive transition: auto-resume immediately
               try {
                 const t = event.target.getCurrentTime() || 0;
                 event.target.playVideo();
@@ -368,30 +421,40 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     });
 
     playerInstanceRef.current = player;
-  }, [apiReady, currentVideo.id, resolution]);
+  }, [playbackMode, apiReady, currentVideo.id, resolution]);
 
   // Apply resolution quality change dynamically when MCU profile switches
   useEffect(() => {
-    if (playerInstanceRef.current) {
+    if (playbackMode === 'iframe' && playerInstanceRef.current) {
       try {
         playerInstanceRef.current.setPlaybackQuality(resolution);
       } catch {
         // ignore if player not ready yet
       }
     }
-  }, [resolution]);
+  }, [playbackMode, resolution]);
 
   const handleTogglePlay = useCallback(() => {
     activateWebAudioKeepAlive();
+
+    if (playbackMode !== 'iframe') {
+      canvasPlayerRef.current?.togglePlay();
+      return;
+    }
+
     const player = playerInstanceRef.current;
     if (!player) return;
     try {
       const state = player.getPlayerState();
       if (state === 1) {
         userPausedRef.current = true;
-        (window as unknown as { __teslaAllowMediaPause?: boolean }).__teslaAllowMediaPause = true;
+        (
+          window as unknown as { __teslaAllowMediaPause?: boolean }
+        ).__teslaAllowMediaPause = true;
         player.pauseVideo();
-        (window as unknown as { __teslaAllowMediaPause?: boolean }).__teslaAllowMediaPause = false;
+        (
+          window as unknown as { __teslaAllowMediaPause?: boolean }
+        ).__teslaAllowMediaPause = false;
         setIsPlaying(false);
       } else {
         userPausedRef.current = false;
@@ -401,23 +464,36 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     } catch {
       setIsPlaying((prev) => !prev);
     }
-  }, []);
+  }, [playbackMode]);
 
-  const handleSeekOffset = useCallback((deltaSeconds: number) => {
-    const player = playerInstanceRef.current;
-    if (!player) return;
-    try {
-      const current = player.getCurrentTime() || 0;
-      const target = Math.max(0, current + deltaSeconds);
-      userPausedRef.current = false;
-      player.seekTo(target, true);
-      player.playVideo();
-    } catch {
-      // ignore
-    }
-  }, []);
+  const handleSeekOffset = useCallback(
+    (deltaSeconds: number) => {
+      if (playbackMode !== 'iframe') {
+        canvasPlayerRef.current?.seekBy(deltaSeconds);
+        return;
+      }
+
+      const player = playerInstanceRef.current;
+      if (!player) return;
+      try {
+        const current = player.getCurrentTime() || 0;
+        const target = Math.max(0, current + deltaSeconds);
+        userPausedRef.current = false;
+        player.seekTo(target, true);
+        player.playVideo();
+      } catch {
+        // ignore
+      }
+    },
+    [playbackMode]
+  );
 
   const handleToggleMute = useCallback(() => {
+    if (playbackMode !== 'iframe') {
+      canvasPlayerRef.current?.toggleMute();
+      return;
+    }
+
     const player = playerInstanceRef.current;
     if (!player) return;
     try {
@@ -431,17 +507,58 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     } catch {
       setIsMuted((prev) => !prev);
     }
-  }, []);
+  }, [playbackMode]);
 
   return (
     <section
       id="tesla-youtube-player-deck"
-      className={`player-deck ${isViewportMaximized ? 'player-deck--maximized' : ''}`}
+      className={`player-deck ${
+        isViewportMaximized ? 'player-deck--maximized' : ''
+      }`}
       aria-label="Reprodutor Integrado YouTube"
     >
-      {/* Top Status & Viewport Bar */}
+      {/* Top Status, Engine Mode Switcher & Viewport Bar */}
       <div className="player-deck__topbar">
         <div className="player-deck__meta-badge-group">
+          <button
+            id="btn-mode-local"
+            type="button"
+            className={`touch-pill-btn ${
+              playbackMode === 'local' ? 'touch-pill-btn--mode-local' : ''
+            }`}
+            onClick={() => handleSelectPlaybackMode('local')}
+            title="Local mode: mp4box.js + tinyh264 / Broadway WASM renderizando no <canvas> + <audio> (Sem tag <video>)"
+          >
+            <Layers size={13} />
+            <span>Local mode</span>
+          </button>
+
+          <button
+            id="btn-mode-external"
+            type="button"
+            className={`touch-pill-btn ${
+              playbackMode === 'external' ? 'touch-pill-btn--mode-external' : ''
+            }`}
+            onClick={() => handleSelectPlaybackMode('external')}
+            title="External mode: APIs públicas Piped / Invidious CORS + decodificador WebAssembly ogv.js + <canvas> + <audio>"
+          >
+            <Globe size={13} />
+            <span>External mode</span>
+          </button>
+
+          <button
+            id="btn-mode-iframe"
+            type="button"
+            className={`touch-pill-btn ${
+              playbackMode === 'iframe' ? 'touch-pill-btn--active' : ''
+            }`}
+            onClick={() => handleSelectPlaybackMode('iframe')}
+            title="Modo IFrame tradicional (/embed/VIDEO_ID)"
+          >
+            <MonitorPlay size={13} />
+            <span>IFrame</span>
+          </button>
+
           <button
             id="btn-toggle-mcu-profile"
             type="button"
@@ -449,21 +566,21 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             onClick={onToggleHardwareProfile}
             title="Alternar resolução entre 720p (MCU2 Atom) e 1080p (MCU3 Ryzen)"
           >
-            <Cpu size={14} />
+            <Cpu size={13} />
             <span>{hardwareProfile === 'MCU2_ATOM' ? '720p' : '1080p'}</span>
           </button>
 
           <button
             id="btn-resync-video-stream"
             type="button"
-            className="touch-pill-btn touch-pill-btn--active"
+            className="touch-pill-btn"
             onClick={() => {
               userPausedRef.current = false;
               forceVideoDecoderResync(false);
             }}
             title="Destravar e sincronizar quadro de vídeo no segundo atual"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={13} />
             <span>Destravar</span>
           </button>
         </div>
@@ -478,32 +595,73 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             onClick={onToggleViewportMaximize}
             title="Maximiza via CSS ocupando 100% da janela útil do navegador"
           >
-            {isViewportMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            {isViewportMaximized ? (
+              <Minimize2 size={13} />
+            ) : (
+              <Maximize2 size={13} />
+            )}
             <span>{isViewportMaximized ? 'Reduzir' : 'Maximizar'}</span>
           </button>
         </div>
       </div>
 
-      {/* Main Video Frame Container with Anti-Hardware-Overlay Compositor Force */}
+      {/* Main Video Stage: Local mode (<canvas> + <audio>) | External mode (<canvas> + <audio>) | IFrame */}
       <div className="player-deck__stage player-deck__stage--drive-compositor">
-        <div
-          ref={playerContainerRef}
-          className="player-deck__iframe-host"
-          id="yt-iframe-mount"
-        />
-
-        {/* Fallback iframe if YT script hasn't initialized yet */}
-        {!apiReady && (
-          <iframe
-            className="player-deck__fallback-iframe"
-            src={`https://www.youtube-nocookie.com/embed/${currentVideo.id}?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&vq=${resolution}`}
-            title={currentVideo.title}
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            allowFullScreen
+        {playbackMode === 'local' && (
+          <LocalModeCanvasPlayer
+            ref={canvasPlayerRef}
+            videoId={currentVideo.id}
+            videoTitle={currentVideo.title}
+            isPlaying={isPlaying}
+            isMuted={isMuted}
+            autoContinuousPlay={autoContinuousPlay}
+            onPlayStateChange={(playing) => {
+              userPausedRef.current = !playing;
+              setIsPlaying(playing);
+            }}
+            onMuteStateChange={(muted) => setIsMuted(muted)}
+            onEnded={onNextVideo}
           />
         )}
 
-        {/* Transparent Canvas Heartbeat to prevent Chromium Hardware Video Overlay freeze in Drive */}
+        {playbackMode === 'external' && (
+          <ExternalModeCanvasPlayer
+            ref={canvasPlayerRef}
+            videoId={currentVideo.id}
+            videoTitle={currentVideo.title}
+            isPlaying={isPlaying}
+            isMuted={isMuted}
+            autoContinuousPlay={autoContinuousPlay}
+            onPlayStateChange={(playing) => {
+              userPausedRef.current = !playing;
+              setIsPlaying(playing);
+            }}
+            onMuteStateChange={(muted) => setIsMuted(muted)}
+            onEnded={onNextVideo}
+          />
+        )}
+
+        {playbackMode === 'iframe' && (
+          <>
+            <div
+              ref={playerContainerRef}
+              className="player-deck__iframe-host"
+              id="yt-iframe-mount"
+            />
+
+            {!apiReady && (
+              <iframe
+                className="player-deck__fallback-iframe"
+                src={`https://www.youtube-nocookie.com/embed/${currentVideo.id}?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&vq=${resolution}`}
+                title={currentVideo.title}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+              />
+            )}
+          </>
+        )}
+
+        {/* Transparent Canvas Heartbeat */}
         <canvas
           ref={compositorCanvasRef}
           width={16}
@@ -522,7 +680,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
             </h2>
           </div>
           <div className="player-deck__subtitle-row">
-            <span className="player-deck__channel">{currentVideo.channelTitle}</span>
+            <span className="player-deck__channel">
+              {currentVideo.channelTitle}
+            </span>
             {activePlaylistTitle && (
               <span className="player-deck__playlist-badge">
                 {currentQueueIndex + 1}/{queue.length}
@@ -619,7 +779,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
           <button
             id="btn-player-autoplay-queue"
             type="button"
-            className={`transport-btn ${autoContinuousPlay ? 'transport-btn--active' : ''}`}
+            className={`transport-btn ${
+              autoContinuousPlay ? 'transport-btn--active' : ''
+            }`}
             onClick={() => setAutoContinuousPlay((v) => !v)}
             aria-label="Alternar reprodução contínua da playlist"
             title={
@@ -634,7 +796,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
           <button
             id="btn-player-toggle-queue"
             type="button"
-            className={`transport-btn ${showQueueDrawer ? 'transport-btn--active' : ''}`}
+            className={`transport-btn ${
+              showQueueDrawer ? 'transport-btn--active' : ''
+            }`}
             onClick={() => setShowQueueDrawer((v) => !v)}
             aria-label="Exibir fila de reprodução"
             title="Fila da Playlist"
@@ -666,7 +830,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
                 {activePlaylistTitle || 'Seleção Atual'}
               </strong>
               <span>
-                Avanço automático ativado via evento YT.PlayerState.ENDED
+                Avanço automático ativado para o modo {playbackMode.toUpperCase()}
               </span>
             </div>
             <button
@@ -686,7 +850,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
                   key={`${item.id}-${idx}`}
                   id={`btn-queue-item-${idx}`}
                   type="button"
-                  className={`queue-item-card ${active ? 'queue-item-card--active' : ''}`}
+                  className={`queue-item-card ${
+                    active ? 'queue-item-card--active' : ''
+                  }`}
                   onClick={() => onSelectQueueVideo(item, idx)}
                 >
                   <span className="queue-item-card__index">{idx + 1}</span>

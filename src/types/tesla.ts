@@ -6,6 +6,9 @@ export type HardwareProfile = 'MCU2_ATOM' | 'MCU3_RYZEN';
 
 export type ResolutionQuality = 'hd720' | 'hd1080';
 
+export type PlaybackMode = 'local' | 'external' | 'iframe';
+
+
 export interface YouTubeVideo {
   id: string;
   title: string;
