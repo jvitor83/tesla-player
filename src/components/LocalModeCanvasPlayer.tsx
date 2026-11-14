@@ -6,12 +6,15 @@ import React, {
   useImperativeHandle,
   forwardRef,
 } from 'react';
-import { createFile, MP4BoxBuffer } from 'mp4box';
+import { createFile, MP4BoxBuffer, DataStream, Endianness } from 'mp4box';
 import TinyH264 from 'tinyh264/es/TinyH264';
 import TinyH264Decoder from 'tinyh264/es/TinyH264Decoder';
 import type { TinyH264WasmModule } from 'tinyh264/es/TinyH264';
 import { Upload, Link2, Cpu, RefreshCw } from 'lucide-react';
-import { resolveCorsStreamsForVideo } from '../services/corsStreamResolver';
+import {
+  resolveCorsStreamsForVideo,
+  getFallbackMp4ForVideoId,
+} from '../services/corsStreamResolver';
 
 export interface CanvasPlayerHandle {
   togglePlay: () => void;
@@ -35,6 +38,7 @@ interface ExtractedVideoSample {
   ptsSec: number;
   durationSec: number;
   isSync: boolean;
+  avccData: Uint8Array;
   nalus: Uint8Array[];
 }
 
@@ -133,6 +137,9 @@ export const LocalModeCanvasPlayer = forwardRef<
 
     const wasmModuleRef = useRef<TinyH264WasmModule | null>(null);
     const decoderRef = useRef<TinyH264Decoder | null>(null);
+    const webCodecsDecoderRef = useRef<VideoDecoder | null>(null);
+    const usingWebCodecsRef = useRef<boolean>(false);
+
     const samplesRef = useRef<ExtractedVideoSample[]>([]);
     const spsAnnexBRef = useRef<Uint8Array[]>([]);
     const ppsAnnexBRef = useRef<Uint8Array[]>([]);
@@ -145,11 +152,12 @@ export const LocalModeCanvasPlayer = forwardRef<
     const clockStartRef = useRef<number>(0);
     const pausedMediaTimeRef = useRef<number>(0);
     const decodedCountRef = useRef<number>(0);
+    const loadSessionIdRef = useRef<number>(0);
 
     const [statusText, setStatusText] = useState<string>(
       'Inicializando MP4Box.js + TinyH264 WASM...'
     );
-    const [sourceLabel, setSourceLabel] = useState<string>('Resolvendo MP4...');
+    const [sourceLabel, setSourceLabel] = useState<string>('Iniciando MP4...');
     const [dimensionsLabel, setDimensionsLabel] = useState<string>('640x360');
     const [naluCounter, setNaluCounter] = useState<number>(0);
     const [fpsEstimate, setFpsEstimate] = useState<number>(24);
@@ -160,14 +168,30 @@ export const LocalModeCanvasPlayer = forwardRef<
     const [customMp4Url, setCustomMp4Url] = useState<string>('');
 
     const isPlayingRef = useRef<boolean>(isPlaying);
+    const isMutedRef = useRef<boolean>(isMuted);
     const autoContinuousPlayRef = useRef<boolean>(autoContinuousPlay);
+    const onPlayStateChangeRef = useRef(onPlayStateChange);
+    const onMuteStateChangeRef = useRef(onMuteStateChange);
     const onEndedRef = useRef(onEnded);
+    const videoTitleRef = useRef(videoTitle);
 
     useEffect(() => {
       isPlayingRef.current = isPlaying;
+      isMutedRef.current = isMuted;
       autoContinuousPlayRef.current = autoContinuousPlay;
+      onPlayStateChangeRef.current = onPlayStateChange;
+      onMuteStateChangeRef.current = onMuteStateChange;
       onEndedRef.current = onEnded;
-    }, [isPlaying, autoContinuousPlay, onEnded]);
+      videoTitleRef.current = videoTitle;
+    }, [
+      isPlaying,
+      isMuted,
+      autoContinuousPlay,
+      onPlayStateChange,
+      onMuteStateChange,
+      onEnded,
+      videoTitle,
+    ]);
 
     // Ensure TinyH264 WASM decoder instance is created
     const recreateTinyH264Decoder = useCallback(async () => {
@@ -211,11 +235,31 @@ export const LocalModeCanvasPlayer = forwardRef<
       return decoder;
     }, []);
 
-    // Decode a single sample by index
+    // Decode a single sample by index via either TinyH264 WASM or WebCodecs VideoDecoder
     const decodeSampleAtIndex = useCallback((idx: number) => {
       const sample = samplesRef.current[idx];
+      if (!sample) return;
+
+      if (usingWebCodecsRef.current && webCodecsDecoderRef.current) {
+        const wc = webCodecsDecoderRef.current;
+        if (wc.state === 'configured') {
+          try {
+            const chunk = new EncodedVideoChunk({
+              type: sample.isSync ? 'key' : 'delta',
+              timestamp: Math.round(sample.ptsSec * 1_000_000),
+              duration: Math.round(sample.durationSec * 1_000_000),
+              data: sample.avccData,
+            });
+            wc.decode(chunk);
+          } catch {
+            // ignore delta frame if waiting for keyframe
+          }
+        }
+        return;
+      }
+
       const decoder = decoderRef.current;
-      if (!sample || !decoder) return;
+      if (!decoder) return;
 
       if (sample.isSync) {
         for (const sps of spsAnnexBRef.current) {
@@ -242,7 +286,6 @@ export const LocalModeCanvasPlayer = forwardRef<
           samples[samples.length - 1].durationSec;
         const clamped = Math.max(0, Math.min(targetSec, maxDur));
 
-        // Find sample index corresponding to clamped timestamp
         let targetIdx = 0;
         for (let i = 0; i < samples.length; i++) {
           if (samples[i].ptsSec <= clamped) {
@@ -252,7 +295,6 @@ export const LocalModeCanvasPlayer = forwardRef<
           }
         }
 
-        // Walk backwards to nearest IDR sync sample
         let syncIdx = targetIdx;
         while (syncIdx > 0 && !samples[syncIdx].isSync) {
           syncIdx--;
@@ -267,7 +309,7 @@ export const LocalModeCanvasPlayer = forwardRef<
         clockStartRef.current = performance.now() - clamped * 1000;
         setCurrentTimeSec(clamped);
 
-        if (audioRef.current) {
+        if (audioRef.current && audioRef.current.src) {
           try {
             audioRef.current.currentTime = clamped;
           } catch {
@@ -278,36 +320,37 @@ export const LocalModeCanvasPlayer = forwardRef<
       [decodeSampleAtIndex]
     );
 
-    // Demux an MP4 ArrayBuffer with mp4box.js and initialize TinyH264 decoding
+    // Demux an MP4 ArrayBuffer with mp4box.js and initialize TinyH264 WASM (or WebCodecs for Main/High profile)
     const demuxAndStartMp4Buffer = useCallback(
       async (
         arrayBuffer: ArrayBuffer,
         audioSourceUrl: string,
         label: string,
+        sessionId: number,
         allowBaselineFallback: boolean
-      ) => {
-        setStatusText(`Demuxando container MP4 via MP4Box.js (${label})...`);
+      ): Promise<boolean> => {
+        if (sessionId !== loadSessionIdRef.current) return false;
+
         const mp4boxfile = createFile();
         const extractedSamples: ExtractedVideoSample[] = [];
         let spsList: Uint8Array[] = [];
         let ppsList: Uint8Array[] = [];
+        let avcDescriptionBytes: Uint8Array | null = null;
+        let codecString = 'avc1.42E01E';
         let nalLengthSize = 4;
         let trackWidth = 640;
         let trackHeight = 360;
         let totalNalCount = 0;
-        let profileIndication = 66;
 
         mp4boxfile.onReady = (info) => {
           const vTrack = info.videoTracks?.[0];
           if (!vTrack) {
-            setStatusText('Nenhuma trilha de vídeo H.264 encontrada no MP4.');
             return;
           }
 
+          codecString = vTrack.codec || 'avc1.42E01E';
           trackWidth = vTrack.video?.width || vTrack.track_width || 640;
           trackHeight = vTrack.video?.height || vTrack.track_height || 360;
-          displaySizeRef.current = { width: trackWidth, height: trackHeight };
-          setDimensionsLabel(`${trackWidth}x${trackHeight}`);
 
           const trak = mp4boxfile.getTrackById(vTrack.id);
           const entries = trak?.mdia?.minf?.stbl?.stsd?.entries || [];
@@ -319,11 +362,11 @@ export const LocalModeCanvasPlayer = forwardRef<
                   lengthSizeMinusOne?: number;
                   SPS?: Array<{ data?: Uint8Array; nalu?: Uint8Array }>;
                   PPS?: Array<{ data?: Uint8Array; nalu?: Uint8Array }>;
+                  write?: (ds: InstanceType<typeof DataStream>) => void;
                 };
               }
             ).avcC;
             if (avcC) {
-              profileIndication = avcC.AVCProfileIndication ?? 66;
               nalLengthSize = (avcC.lengthSizeMinusOne ?? 3) + 1;
               spsList = (avcC.SPS || [])
                 .map((s) => s.data || s.nalu)
@@ -333,11 +376,27 @@ export const LocalModeCanvasPlayer = forwardRef<
                 .map((p) => p.data || p.nalu)
                 .filter((x): x is Uint8Array => Boolean(x))
                 .map(prependAnnexBStartCode);
+
+              if (typeof avcC.write === 'function') {
+                try {
+                  const ds = new DataStream(
+                    undefined,
+                    0,
+                    Endianness.BIG_ENDIAN
+                  );
+                  avcC.write(ds);
+                  if (ds.buffer && ds.buffer.byteLength > 8) {
+                    avcDescriptionBytes = new Uint8Array(ds.buffer, 8);
+                  }
+                } catch {
+                  // ignore
+                }
+              }
             }
           }
 
           mp4boxfile.setExtractionOptions(vTrack.id, null, {
-            nbSamples: 4000,
+            nbSamples: 5000,
           });
           mp4boxfile.start();
         };
@@ -374,6 +433,7 @@ export const LocalModeCanvasPlayer = forwardRef<
                 ptsSec: (sample.cts ?? sample.dts ?? 0) / timescale,
                 durationSec: (sample.duration || 40) / timescale,
                 isSync: Boolean(sample.is_sync),
+                avccData: new Uint8Array(data),
                 nalus: sampleNalus,
               });
             }
@@ -384,136 +444,263 @@ export const LocalModeCanvasPlayer = forwardRef<
         mp4boxfile.appendBuffer(mp4Buffer);
         mp4boxfile.flush();
 
-        // Sort samples by presentation timestamp
+        if (sessionId !== loadSessionIdRef.current) return false;
+        if (extractedSamples.length === 0) {
+          return false;
+        }
+
         extractedSamples.sort((a, b) => a.ptsSec - b.ptsSec);
 
+        // Normalize timestamps if first sample doesn't start at 0
+        const firstPts = extractedSamples[0].ptsSec;
+        if (firstPts > 0.2) {
+          for (const s of extractedSamples) {
+            s.ptsSec = Math.max(0, s.ptsSec - firstPts);
+          }
+        }
+
+        displaySizeRef.current = { width: trackWidth, height: trackHeight };
+        setDimensionsLabel(`${trackWidth}x${trackHeight}`);
         spsAnnexBRef.current = spsList;
         ppsAnnexBRef.current = ppsList;
         samplesRef.current = extractedSamples;
         setNaluCounter(totalNalCount);
 
+        // Close any previous WebCodecs decoder
+        if (webCodecsDecoderRef.current) {
+          try {
+            webCodecsDecoderRef.current.close();
+          } catch {
+            // ignore
+          }
+          webCodecsDecoderRef.current = null;
+        }
+        usingWebCodecsRef.current = false;
+
+        // First try TinyH264 WASM decoder
         decodedCountRef.current = 0;
         await recreateTinyH264Decoder();
+        if (sessionId !== loadSessionIdRef.current) return false;
 
-        // Test decode the first few samples to verify H.264 Baseline compatibility with TinyH264
-        const probeCount = Math.min(8, extractedSamples.length);
+        const probeCount = Math.min(6, extractedSamples.length);
         for (let i = 0; i < probeCount; i++) {
           decodeSampleAtIndex(i);
         }
 
-        if (decodedCountRef.current === 0 && allowBaselineFallback) {
-          // Stream used CABAC/B-frames (High/Main profile) unsupported by TinyH264 Baseline WASM
-          setStatusText(
-            `Perfil H.264 (${profileIndication}) requer Baseline -> Carregando stream H.264 Baseline WASM...`
-          );
-          const fallbackRes = await fetch('./media/tesla-drive-baseline.mp4');
-          const fallbackBuf = await fallbackRes.arrayBuffer();
-          await demuxAndStartMp4Buffer(
-            fallbackBuf,
-            './media/tesla-drive-baseline.mp4',
-            'H.264 Constrained Baseline (Canvas + Audio)',
-            false
-          );
-          return;
+        // If TinyH264 WASM produced 0 frames (e.g. Main/High profile CABAC stream), use WebCodecs VideoDecoder onto <canvas>
+        if (
+          decodedCountRef.current === 0 &&
+          typeof window.VideoDecoder !== 'undefined' &&
+          avcDescriptionBytes
+        ) {
+          try {
+            const support = await window.VideoDecoder.isConfigSupported({
+              codec: codecString,
+              codedWidth: trackWidth,
+              codedHeight: trackHeight,
+              description: avcDescriptionBytes,
+            });
+            if (support.supported) {
+              const wcDecoder = new window.VideoDecoder({
+                output: (videoFrame) => {
+                  decodedCountRef.current += 1;
+                  const canvas = canvasRef.current;
+                  if (canvas) {
+                    const fw = videoFrame.displayWidth || trackWidth;
+                    const fh = videoFrame.displayHeight || trackHeight;
+                    if (canvas.width !== fw || canvas.height !== fh) {
+                      canvas.width = fw;
+                      canvas.height = fh;
+                    }
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) {
+                      ctx.drawImage(videoFrame, 0, 0, fw, fh);
+                    }
+                  }
+                  videoFrame.close();
+                },
+                error: () => {
+                  // ignore decode error
+                },
+              });
+              wcDecoder.configure({
+                codec: codecString,
+                codedWidth: trackWidth,
+                codedHeight: trackHeight,
+                description: avcDescriptionBytes,
+              });
+              webCodecsDecoderRef.current = wcDecoder;
+              usingWebCodecsRef.current = true;
+              decodeSampleAtIndex(0);
+            }
+          } catch {
+            usingWebCodecsRef.current = false;
+          }
         }
 
-        // Reset to frame 0 and decode initial keyframe onto <canvas>
+        if (
+          decodedCountRef.current === 0 &&
+          !usingWebCodecsRef.current &&
+          allowBaselineFallback
+        ) {
+          return false;
+        }
+
+        // Reset playback clock to frame 0 and render first frame immediately
         currentSampleIdxRef.current = 0;
         pausedMediaTimeRef.current = 0;
         clockStartRef.current = performance.now();
-        if (extractedSamples.length > 0) {
-          const last = extractedSamples[extractedSamples.length - 1];
-          const totalDur = last.ptsSec + last.durationSec;
-          setDurationSec(totalDur);
-          if (totalDur > 0) {
-            setFpsEstimate(Math.round(extractedSamples.length / totalDur));
-          }
-          decodeSampleAtIndex(0);
-          currentSampleIdxRef.current = 1;
-        }
 
+        const last = extractedSamples[extractedSamples.length - 1];
+        const totalDur = Math.max(0.5, last.ptsSec + last.durationSec);
+        setDurationSec(totalDur);
+        setFpsEstimate(Math.max(1, Math.round(extractedSamples.length / totalDur)));
+        setCurrentTimeSec(0);
+
+        decodeSampleAtIndex(0);
+        currentSampleIdxRef.current = 1;
+
+        const engineTag = usingWebCodecsRef.current
+          ? 'MP4Box.js + WebCodecs H.264'
+          : 'MP4Box.js + TinyH264 WASM';
         setSourceLabel(label);
         setStatusText(
-          `Ativo: ${extractedSamples.length} quadros H.264 no <canvas> + <audio> (Sem tag <video>)`
+          `Reproduzindo via ${engineTag} (${extractedSamples.length} quadros no <canvas> + <audio>)`
         );
 
         if (audioRef.current) {
           audioRef.current.src = audioSourceUrl;
-          audioRef.current.muted = isMuted;
+          audioRef.current.muted = isMutedRef.current;
           audioRef.current.currentTime = 0;
           if (isPlayingRef.current) {
-            audioRef.current.play().catch(() => undefined);
+            audioRef.current.play().catch(() => {
+              // If browser blocks unmuted autoplay before gesture, <canvas> still plays via performance.now() clock!
+            });
           }
         }
+
+        return true;
       },
-      [decodeSampleAtIndex, isMuted, recreateTinyH264Decoder]
+      [decodeSampleAtIndex, recreateTinyH264Decoder]
     );
 
-    // Load stream for current YouTube video (trying CORS MP4 first, then Baseline MP4 fallback)
-    const loadStreamForCurrentVideo = useCallback(
+    // Fetch up to maxBytes of an MP4 URL so large streams don't hang waiting for 200MB
+    const fetchMp4BufferCapped = useCallback(
+      async (url: string, maxBytes = 6 * 1024 * 1024): Promise<ArrayBuffer> => {
+        const res = await fetch(url, { mode: 'cors' });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        if (!res.body) {
+          return await res.arrayBuffer();
+        }
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        while (total < maxBytes) {
+          const { done, value } = await reader.read();
+          if (done || !value) break;
+          chunks.push(value);
+          total += value.byteLength;
+        }
+        try {
+          await reader.cancel();
+        } catch {
+          // ignore
+        }
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          merged.set(c, offset);
+          offset += c.byteLength;
+        }
+        return merged.buffer;
+      },
+      []
+    );
+
+    // Load stream for current YouTube video:
+    // 1. Immediately start local H.264 Baseline stream (<250ms) so the video starts right away when clicked!
+    // 2. In parallel, query Piped/Invidious CORS APIs; if a live CORS MP4 stream is available and decodable, hot-swap to it.
+    const startVideoSession = useCallback(
       async (customUrlOverride?: string) => {
+        const sessionId = ++loadSessionIdRef.current;
+        onPlayStateChangeRef.current(true);
+
         try {
           if (customUrlOverride) {
-            setStatusText(`Baixando MP4 CORS: ${customUrlOverride}...`);
-            const res = await fetch(customUrlOverride, { mode: 'cors' });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const buf = await res.arrayBuffer();
-            await demuxAndStartMp4Buffer(
+            setStatusText(`Carregando MP4 CORS: ${customUrlOverride}...`);
+            const buf = await fetchMp4BufferCapped(customUrlOverride);
+            const ok = await demuxAndStartMp4Buffer(
               buf,
               customUrlOverride,
               'URL MP4 Customizada',
+              sessionId,
               false
             );
+            if (!ok && sessionId === loadSessionIdRef.current) {
+              setStatusText(
+                'MP4 não contém atom moov no início ou perfil incompatível.'
+              );
+            }
             return;
           }
 
+          // Step 1: Instant start with bundled H.264 Baseline MP4 so user sees video playing immediately
+          const instantMp4Url = getFallbackMp4ForVideoId(videoId);
           setStatusText(
-            `Consultando stream MP4 CORS para ${videoId} (${videoTitle.slice(
+            `Iniciando ${videoTitleRef.current.slice(
               0,
-              28
-            )})...`
+              32
+            )} no <canvas> + <audio>...`
           );
-          const resolved = await resolveCorsStreamsForVideo(videoId);
-
-          if (!resolved.isFallback && resolved.mp4Url) {
-            try {
-              const res = await fetch(resolved.mp4Url, { mode: 'cors' });
-              if (res.ok) {
-                const buf = await res.arrayBuffer();
-                await demuxAndStartMp4Buffer(
-                  buf,
-                  resolved.audioUrl || resolved.mp4Url,
-                  `${resolved.instanceName} (MP4)`,
-                  true
-                );
-                return;
-              }
-            } catch {
-              // Fall through to bundled H.264 Baseline stream
-            }
-          }
-
-          const fallbackUrl = './media/tesla-drive-baseline.mp4';
-          const fallbackRes = await fetch(fallbackUrl);
-          const fallbackBuf = await fallbackRes.arrayBuffer();
+          const instantRes = await fetch(instantMp4Url);
+          const instantBuf = await instantRes.arrayBuffer();
           await demuxAndStartMp4Buffer(
-            fallbackBuf,
-            fallbackUrl,
-            'H.264 Baseline Stream (Local Mode WASM)',
+            instantBuf,
+            instantMp4Url,
+            `Local Mode WASM (${videoId})`,
+            sessionId,
             false
           );
+
+          // Step 2: Check in background if a live Piped/Invidious CORS MP4 is available for this videoId
+          const resolved = await resolveCorsStreamsForVideo(videoId);
+          if (
+            sessionId === loadSessionIdRef.current &&
+            !resolved.isFallback &&
+            resolved.mp4Url
+          ) {
+            try {
+              const remoteBuf = await fetchMp4BufferCapped(resolved.mp4Url);
+              if (sessionId === loadSessionIdRef.current) {
+                await demuxAndStartMp4Buffer(
+                  remoteBuf,
+                  resolved.audioUrl || resolved.mp4Url,
+                  `${resolved.instanceName} (MP4)`,
+                  sessionId,
+                  true
+                );
+              }
+            } catch {
+              // Keep playing the active instant stream seamlessly
+            }
+          }
         } catch (err) {
-          const msg =
-            err instanceof Error ? err.message : 'Erro ao inicializar MP4Box';
-          setStatusText(`Erro Local Mode: ${msg}`);
+          if (sessionId === loadSessionIdRef.current) {
+            const msg =
+              err instanceof Error ? err.message : 'Erro ao inicializar MP4Box';
+            setStatusText(`Erro Local Mode: ${msg}`);
+          }
         }
       },
-      [demuxAndStartMp4Buffer, videoId, videoTitle]
+      [demuxAndStartMp4Buffer, fetchMp4BufferCapped, videoId]
     );
 
     useEffect(() => {
-      loadStreamForCurrentVideo();
+      startVideoSession();
       return () => {
+        loadSessionIdRef.current += 1;
         if (decoderRef.current) {
           try {
             decoderRef.current.release();
@@ -521,12 +708,15 @@ export const LocalModeCanvasPlayer = forwardRef<
             // ignore
           }
         }
-        if (blobUrlRef.current) {
-          URL.revokeObjectURL(blobUrlRef.current);
-          blobUrlRef.current = null;
+        if (webCodecsDecoderRef.current) {
+          try {
+            webCodecsDecoderRef.current.close();
+          } catch {
+            // ignore
+          }
         }
       };
-    }, [loadStreamForCurrentVideo]);
+    }, [startVideoSession]);
 
     // Synchronize Play/Pause state from parent deck
     useEffect(() => {
@@ -534,7 +724,7 @@ export const LocalModeCanvasPlayer = forwardRef<
       if (isPlaying) {
         clockStartRef.current =
           performance.now() - pausedMediaTimeRef.current * 1000;
-        if (audio && audio.paused) {
+        if (audio && audio.src && audio.paused) {
           audio.play().catch(() => undefined);
         }
       } else {
@@ -551,7 +741,7 @@ export const LocalModeCanvasPlayer = forwardRef<
       }
     }, [isMuted]);
 
-    // Main requestAnimationFrame loop driving TinyH264 <canvas> rendering synchronized to <audio>
+    // Main requestAnimationFrame loop driving TinyH264 / WebCodecs <canvas> rendering synchronized to <audio>
     useEffect(() => {
       let rafId = 0;
 
@@ -561,7 +751,12 @@ export const LocalModeCanvasPlayer = forwardRef<
           const audio = audioRef.current;
           let mediaSec: number;
 
-          if (audio && !audio.paused && audio.readyState >= 2) {
+          if (
+            audio &&
+            !audio.paused &&
+            audio.readyState >= 2 &&
+            audio.currentTime > 0
+          ) {
             mediaSec = audio.currentTime;
             clockStartRef.current = performance.now() - mediaSec * 1000;
           } else {
@@ -571,26 +766,23 @@ export const LocalModeCanvasPlayer = forwardRef<
           pausedMediaTimeRef.current = mediaSec;
           setCurrentTimeSec(mediaSec);
 
-          // Decode all samples whose PTS <= current mediaSec
           while (
             currentSampleIdxRef.current < samples.length &&
-            samples[currentSampleIdxRef.current].ptsSec <= mediaSec + 0.008
+            samples[currentSampleIdxRef.current].ptsSec <= mediaSec + 0.012
           ) {
             decodeSampleAtIndex(currentSampleIdxRef.current);
             currentSampleIdxRef.current += 1;
           }
 
-          // Handle end of stream
           if (currentSampleIdxRef.current >= samples.length) {
             if (autoContinuousPlayRef.current) {
-              // Loop seamlessly so canvas keeps rendering in Drive mode
               seekToSeconds(0);
-              if (audioRef.current) {
+              if (audioRef.current && audioRef.current.src) {
                 audioRef.current.currentTime = 0;
                 audioRef.current.play().catch(() => undefined);
               }
             } else {
-              onPlayStateChange(false);
+              onPlayStateChangeRef.current(false);
             }
           }
         }
@@ -600,7 +792,7 @@ export const LocalModeCanvasPlayer = forwardRef<
 
       rafId = window.requestAnimationFrame(renderLoop);
       return () => window.cancelAnimationFrame(rafId);
-    }, [decodeSampleAtIndex, onPlayStateChange, seekToSeconds]);
+    }, [decodeSampleAtIndex, seekToSeconds]);
 
     // Handle local .mp4 file selection from device / USB
     const handleFileUpload = useCallback(
@@ -608,6 +800,7 @@ export const LocalModeCanvasPlayer = forwardRef<
         const file = e.target.files?.[0];
         if (!file) return;
 
+        const sessionId = ++loadSessionIdRef.current;
         if (blobUrlRef.current) {
           URL.revokeObjectURL(blobUrlRef.current);
         }
@@ -619,11 +812,12 @@ export const LocalModeCanvasPlayer = forwardRef<
           buf,
           blobUrl,
           `Arquivo: ${file.name}`,
+          sessionId,
           false
         );
-        onPlayStateChange(true);
+        onPlayStateChangeRef.current(true);
       },
-      [demuxAndStartMp4Buffer, onPlayStateChange]
+      [demuxAndStartMp4Buffer]
     );
 
     useImperativeHandle(
@@ -631,21 +825,21 @@ export const LocalModeCanvasPlayer = forwardRef<
       () => ({
         togglePlay: () => {
           const next = !isPlayingRef.current;
-          onPlayStateChange(next);
+          onPlayStateChangeRef.current(next);
         },
         seekBy: (deltaSeconds: number) => {
           seekToSeconds(pausedMediaTimeRef.current + deltaSeconds);
         },
         toggleMute: () => {
-          const next = !isMuted;
-          onMuteStateChange(next);
+          const next = !isMutedRef.current;
+          onMuteStateChangeRef.current(next);
         },
         resync: () => {
           seekToSeconds(pausedMediaTimeRef.current);
-          onPlayStateChange(true);
+          onPlayStateChangeRef.current(true);
         },
       }),
-      [isMuted, onMuteStateChange, onPlayStateChange, seekToSeconds]
+      [seekToSeconds]
     );
 
     const formatTime = (sec: number) => {
@@ -685,7 +879,7 @@ export const LocalModeCanvasPlayer = forwardRef<
               type="button"
               className="canvas-hud-btn"
               onClick={() => fileInputRef.current?.click()}
-              title="Carregar arquivo .MP4 (H.264 Baseline) local ou USB para decodificar no <canvas>"
+              title="Carregar arquivo .MP4 local ou USB para decodificar no <canvas>"
             >
               <Upload size={12} />
               <span>Abrir .MP4</span>
@@ -708,7 +902,7 @@ export const LocalModeCanvasPlayer = forwardRef<
               id="btn-local-reload-stream"
               type="button"
               className="canvas-hud-btn"
-              onClick={() => loadStreamForCurrentVideo()}
+              onClick={() => startVideoSession()}
               title="Recarregar e demuxar stream MP4 novamente"
             >
               <RefreshCw size={12} />
@@ -723,7 +917,7 @@ export const LocalModeCanvasPlayer = forwardRef<
             onSubmit={(e) => {
               e.preventDefault();
               if (customMp4Url.trim()) {
-                loadStreamForCurrentVideo(customMp4Url.trim());
+                startVideoSession(customMp4Url.trim());
                 setShowCustomUrlInput(false);
               }
             }}
@@ -732,10 +926,13 @@ export const LocalModeCanvasPlayer = forwardRef<
               type="url"
               value={customMp4Url}
               onChange={(e) => setCustomMp4Url(e.target.value)}
-              placeholder="https://exemplo.com/stream-baseline.mp4 (CORS habilitado)"
+              placeholder="https://exemplo.com/stream.mp4 (CORS habilitado)"
               className="canvas-mode-stage__url-input"
             />
-            <button type="submit" className="canvas-hud-btn canvas-hud-btn--active">
+            <button
+              type="submit"
+              className="canvas-hud-btn canvas-hud-btn--active"
+            >
               Decodificar MP4
             </button>
           </form>
@@ -748,7 +945,13 @@ export const LocalModeCanvasPlayer = forwardRef<
           className="canvas-mode-stage__canvas"
           width={640}
           height={360}
-          onClick={() => onPlayStateChange(!isPlayingRef.current)}
+          onClick={() => {
+            const next = !isPlayingRef.current;
+            onPlayStateChange(next);
+            if (next && audioRef.current && audioRef.current.src) {
+              audioRef.current.play().catch(() => undefined);
+            }
+          }}
         />
 
         {/* Pure HTML5 <audio> element for synchronized audio track in Drive mode */}

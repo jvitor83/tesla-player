@@ -83,6 +83,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
     const mountContainerRef = useRef<HTMLDivElement | null>(null);
     const ogvPlayerRef = useRef<OGVPlayerElement | null>(null);
     const auxAudioRef = useRef<HTMLAudioElement | null>(null);
+    const sessionIdRef = useRef<number>(0);
 
     const [selectedInstanceId, setSelectedInstanceId] = useState<string>(
       PUBLIC_CORS_INSTANCES[0].id
@@ -102,14 +103,28 @@ export const ExternalModeCanvasPlayer = forwardRef<
     const isPlayingRef = useRef<boolean>(isPlaying);
     const isMutedRef = useRef<boolean>(isMuted);
     const autoContinuousPlayRef = useRef<boolean>(autoContinuousPlay);
+    const onPlayStateChangeRef = useRef(onPlayStateChange);
+    const onMuteStateChangeRef = useRef(onMuteStateChange);
     const onEndedRef = useRef(onEnded);
+    const videoTitleRef = useRef(videoTitle);
 
     useEffect(() => {
       isPlayingRef.current = isPlaying;
       isMutedRef.current = isMuted;
       autoContinuousPlayRef.current = autoContinuousPlay;
+      onPlayStateChangeRef.current = onPlayStateChange;
+      onMuteStateChangeRef.current = onMuteStateChange;
       onEndedRef.current = onEnded;
-    }, [isPlaying, isMuted, autoContinuousPlay, onEnded]);
+      videoTitleRef.current = videoTitle;
+    }, [
+      isPlaying,
+      isMuted,
+      autoContinuousPlay,
+      onPlayStateChange,
+      onMuteStateChange,
+      onEnded,
+      videoTitle,
+    ]);
 
     const mountOgvStream = useCallback(
       async (
@@ -117,12 +132,18 @@ export const ExternalModeCanvasPlayer = forwardRef<
         separateAudioUrl: string | undefined,
         instanceLabel: string,
         codec: string,
+        sessionId: number,
         allowFallbackOnError: boolean
       ) => {
         await ensureOgvRuntimeLoaded();
-        if (!mountContainerRef.current || !window.OGVPlayer) return;
+        if (
+          sessionId !== sessionIdRef.current ||
+          !mountContainerRef.current ||
+          !window.OGVPlayer
+        ) {
+          return;
+        }
 
-        // Clean up any existing OGVPlayer instance
         if (ogvPlayerRef.current) {
           try {
             ogvPlayerRef.current.pause();
@@ -147,7 +168,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
         player.addEventListener('loadedmetadata', () => {
           const w = player.videoWidth || 640;
           const h = player.videoHeight || 360;
-          setDurationSec(player.duration || 8);
+          setDurationSec(player.duration || 10);
           setCodecBadge(`${codec} (${w}x${h})`);
           setStatusText(
             `Decodificando via WebAssembly (ogv.js) no <canvas> + <audio> (${w}x${h})`
@@ -170,12 +191,12 @@ export const ExternalModeCanvasPlayer = forwardRef<
               // ignore
             }
           } else {
-            onPlayStateChange(false);
+            onPlayStateChangeRef.current(false);
           }
         });
 
         player.addEventListener('error', () => {
-          if (allowFallbackOnError) {
+          if (allowFallbackOnError && sessionId === sessionIdRef.current) {
             setStatusText(
               'Stream remoto bloqueado por CORS/expirado -> Ativando WebM VP8/Vorbis CORS no <canvas>...'
             );
@@ -184,6 +205,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
               undefined,
               'Stream CORS VP8/Vorbis (WASM)',
               'VP8 + Vorbis WASM',
+              sessionId,
               false
             );
           } else {
@@ -195,7 +217,6 @@ export const ExternalModeCanvasPlayer = forwardRef<
         ogvPlayerRef.current = player;
         setActiveInstanceName(instanceLabel);
 
-        // Configure separate <audio> element only if stream is video-only adaptive
         if (auxAudioRef.current) {
           if (separateAudioUrl && separateAudioUrl !== streamUrl) {
             auxAudioRef.current.src = separateAudioUrl;
@@ -216,20 +237,15 @@ export const ExternalModeCanvasPlayer = forwardRef<
           }
         }
       },
-      [onPlayStateChange]
+      []
     );
 
     const resolveAndPlayExternal = useCallback(
       async (overrideInstanceId?: string, customUrl?: string) => {
+        const sessionId = ++sessionIdRef.current;
         const targetInst = overrideInstanceId || selectedInstanceId;
-        setStatusText(
-          `Consultando Piped / Invidious CORS para ${videoId} (${videoTitle.slice(
-            0,
-            26
-          )})...`
-        );
+        onPlayStateChangeRef.current(true);
 
-        // If user entered a direct .webm or .ogv URL, play it directly in OGVPlayer
         if (
           customUrl &&
           (customUrl.endsWith('.webm') || customUrl.endsWith('.ogv'))
@@ -240,32 +256,59 @@ export const ExternalModeCanvasPlayer = forwardRef<
             undefined,
             'URL WebM/OGV Direta',
             'VP8/VP9 WASM',
+            sessionId,
             true
           );
           return;
         }
+
+        // Start immediate WebM VP8 WASM stream so the <canvas> starts right away
+        await mountOgvStream(
+          './media/tesla-drive-vp8.webm',
+          undefined,
+          `External Mode WASM (${videoId})`,
+          'VP8 + Vorbis WASM',
+          sessionId,
+          false
+        );
+
+        setStatusText(
+          `Consultando Piped / Invidious CORS para ${videoId} (${videoTitleRef.current.slice(
+            0,
+            26
+          )})...`
+        );
 
         const resolved = await resolveCorsStreamsForVideo(
           videoId,
           targetInst,
           customUrl
         );
+        if (sessionId !== sessionIdRef.current) return;
         setResolverLogs(resolved.logs);
 
-        await mountOgvStream(
-          resolved.webmUrl,
-          resolved.isFallback ? undefined : resolved.audioUrl,
-          resolved.instanceName,
-          resolved.codecLabel,
-          !resolved.isFallback
-        );
+        if (!resolved.isFallback && resolved.webmUrl) {
+          await mountOgvStream(
+            resolved.webmUrl,
+            resolved.audioUrl,
+            resolved.instanceName,
+            resolved.codecLabel,
+            sessionId,
+            true
+          );
+        } else {
+          setStatusText(
+            `Ativo via ogv.js WASM no <canvas> + <audio> (${resolved.instanceName})`
+          );
+        }
       },
-      [mountOgvStream, selectedInstanceId, videoId, videoTitle]
+      [mountOgvStream, selectedInstanceId, videoId]
     );
 
     useEffect(() => {
       resolveAndPlayExternal();
       return () => {
+        sessionIdRef.current += 1;
         if (ogvPlayerRef.current) {
           try {
             ogvPlayerRef.current.pause();
@@ -316,7 +359,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
       () => ({
         togglePlay: () => {
           const next = !isPlayingRef.current;
-          onPlayStateChange(next);
+          onPlayStateChangeRef.current(next);
         },
         seekBy: (deltaSeconds: number) => {
           const player = ogvPlayerRef.current;
@@ -336,20 +379,13 @@ export const ExternalModeCanvasPlayer = forwardRef<
         },
         toggleMute: () => {
           const next = !isMutedRef.current;
-          onMuteStateChange(next);
+          onMuteStateChangeRef.current(next);
         },
         resync: () => {
           resolveAndPlayExternal(selectedInstanceId, customEndpointInput);
-          onPlayStateChange(true);
         },
       }),
-      [
-        customEndpointInput,
-        onMuteStateChange,
-        onPlayStateChange,
-        resolveAndPlayExternal,
-        selectedInstanceId,
-      ]
+      [customEndpointInput, resolveAndPlayExternal, selectedInstanceId]
     );
 
     const formatTime = (sec: number) => {
@@ -452,7 +488,10 @@ export const ExternalModeCanvasPlayer = forwardRef<
             </form>
             <div className="canvas-mode-stage__log-list">
               {resolverLogs.map((line, i) => (
-                <div key={`${i}-${line}`} className="canvas-mode-stage__log-item">
+                <div
+                  key={`${i}-${line}`}
+                  className="canvas-mode-stage__log-item"
+                >
                   {line}
                 </div>
               ))}
@@ -465,7 +504,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
           ref={mountContainerRef}
           id="ogv-wasm-stage-mount"
           className="canvas-mode-stage__ogv-mount"
-          onClick={() => onPlayStateChange(!isPlayingRef.current)}
+          onClick={() => onPlayStateChangeRef.current(!isPlayingRef.current)}
         />
 
         {/* Synchronized HTML5 <audio> element for adaptive streams */}
