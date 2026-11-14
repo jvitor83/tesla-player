@@ -1001,7 +1001,7 @@ export const LocalModeCanvasPlayer = forwardRef<
               <span className="canvas-mode-badge canvas-mode-badge--local">
                 <Cpu size={12} />
                 <span>
-                  LOCAL MODE • MP4Box.js + TinyH264 WASM Worker (WebGL)
+                  BACKENDLESS MODE • MP4Box.js + TinyH264 WASM Worker (WebGL)
                 </span>
               </span>
               <span className="canvas-mode-badge">

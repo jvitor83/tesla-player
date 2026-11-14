@@ -318,7 +318,8 @@ a {
   color: #6df0a3;
 }
 
-.touch-pill-btn--mode-local {
+.touch-pill-btn--mode-local,
+.touch-pill-btn--mode-backendless {
   background-color: rgba(62, 106, 225, 0.24);
   border-color: rgba(114, 152, 255, 0.65);
   color: #93b4ff;
@@ -414,7 +415,8 @@ a {
   backdrop-filter: blur(6px);
 }
 
-.canvas-mode-badge--local {
+.canvas-mode-badge--local,
+.canvas-mode-badge--backendless {
   color: #93b4ff;
   border-color: rgba(114, 152, 255, 0.5);
   background: rgba(20, 36, 78, 0.85);

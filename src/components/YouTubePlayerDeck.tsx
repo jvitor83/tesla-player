@@ -131,10 +131,15 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
 
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(() => {
     const saved = localStorage.getItem(PLAYBACK_MODE_STORAGE_KEY);
-    if (saved === 'local' || saved === 'external' || saved === 'iframe') {
-      return saved;
+    if (
+      saved === 'backendless' ||
+      saved === 'local' ||
+      saved === 'external' ||
+      saved === 'iframe'
+    ) {
+      return saved === 'local' ? 'backendless' : saved;
     }
-    return 'local';
+    return 'backendless';
   });
 
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
@@ -523,16 +528,18 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
       <div className="player-deck__topbar">
         <div className="player-deck__meta-badge-group">
           <button
-            id="btn-mode-local"
+            id="btn-mode-backendless"
             type="button"
             className={`touch-pill-btn ${
-              playbackMode === 'local' ? 'touch-pill-btn--mode-local' : ''
+              playbackMode === 'backendless' || playbackMode === 'local'
+                ? 'touch-pill-btn--mode-local'
+                : ''
             }`}
-            onClick={() => handleSelectPlaybackMode('local')}
-            title="Local mode: mp4box.js + tinyh264 / Broadway WASM renderizando no <canvas> + <audio> (Sem tag <video>)"
+            onClick={() => handleSelectPlaybackMode('backendless')}
+            title="Backendless mode: mp4box.js + tinyh264 / Broadway WASM renderizando no <canvas> + <audio> (Sem tag <video>)"
           >
             <Layers size={13} />
-            <span>Local mode</span>
+            <span>Backendless</span>
           </button>
 
           <button
@@ -607,9 +614,9 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
         </div>
       </div>
 
-      {/* Main Video Stage: Local mode (<canvas> + <audio>) | External mode (<canvas> + <audio>) | IFrame */}
+      {/* Main Video Stage: Backendless mode (<canvas> + <audio>) | External mode (<canvas> + <audio>) | IFrame */}
       <div className="player-deck__stage player-deck__stage--drive-compositor">
-        {playbackMode === 'local' && (
+        {(playbackMode === 'backendless' || playbackMode === 'local') && (
           <LocalModeCanvasPlayer
             ref={canvasPlayerRef}
             videoId={currentVideo.id}
