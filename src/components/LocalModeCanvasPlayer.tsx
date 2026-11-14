@@ -845,8 +845,13 @@ export const LocalModeCanvasPlayer = forwardRef<
       videoId,
     ]);
 
+    const startVideoSessionRef = useRef(startVideoSession);
     useEffect(() => {
-      startVideoSession();
+      startVideoSessionRef.current = startVideoSession;
+    }, [startVideoSession]);
+
+    useEffect(() => {
+      startVideoSessionRef.current();
       return () => {
         loadSessionIdRef.current += 1;
         if (webCodecsDecoderRef.current) {
@@ -857,7 +862,7 @@ export const LocalModeCanvasPlayer = forwardRef<
           }
         }
       };
-    }, [startVideoSession]);
+    }, [videoId, externalStreamOverride?.mp4Url]);
 
     // Clean up Web Worker on unmount
     useEffect(() => {

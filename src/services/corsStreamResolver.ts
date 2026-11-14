@@ -301,83 +301,68 @@ async function querySingleInstance(
       logs,
     };
   } else {
-    const latestVersionItag18 = `${instance.baseUrl}/latest_version?id=${encodeURIComponent(
-      normalizedId
-    )}&itag=18&local=true`;
     const endpoint = `${instance.baseUrl}/api/v1/videos/${encodeURIComponent(
       normalizedId
     )}?local=true`;
-    logs.push(`GET ${latestVersionItag18}`);
+    logs.push(`GET ${endpoint}`);
 
-    let resolvedTitle: string | undefined;
-    let resolvedMp4 = latestVersionItag18;
-    let resolvedWebm = '';
-    let resolvedAudio = latestVersionItag18;
-    let resolvedCodec = 'itag=18 H.264 / AAC (local=true)';
-
-    try {
-      const res = await fetchWithTimeout(endpoint, 6000, {
-        headers: { Accept: 'application/json' },
-      });
-      if (res.ok) {
-        const data = (await res.json()) as InvidiousResponse;
-        if (!data.error) {
-          resolvedTitle = data.title;
-          const formatStreams = data.formatStreams || [];
-          const adaptiveFormats = data.adaptiveFormats || [];
-
-          const muxedMp4 = formatStreams.find(
-            (f) =>
-              f.url &&
-              (String(f.itag) === '18' ||
-                f.container === 'mp4' ||
-                f.type?.includes('video/mp4'))
-          );
-
-          const webmCandidate = formatStreams.find(
-            (f) =>
-              f.url &&
-              (f.container === 'webm' || f.type?.includes('video/webm'))
-          );
-
-          const audioCandidate = adaptiveFormats.find(
-            (f) =>
-              f.url &&
-              (f.type?.includes('audio/mp4') ||
-                f.type?.includes('audio/webm') ||
-                f.type?.includes('audio/'))
-          );
-
-          if (muxedMp4?.url) {
-            resolvedMp4 = withLocalCorsParam(muxedMp4.url, instance.baseUrl);
-          }
-          if (webmCandidate?.url) {
-            resolvedWebm = withLocalCorsParam(
-              webmCandidate.url,
-              instance.baseUrl
-            );
-          }
-          if (muxedMp4?.url) {
-            resolvedAudio = resolvedMp4;
-          } else if (audioCandidate?.url) {
-            resolvedAudio = withLocalCorsParam(
-              audioCandidate.url,
-              instance.baseUrl
-            );
-          }
-          if (muxedMp4?.encoding || webmCandidate?.encoding) {
-            resolvedCodec =
-              muxedMp4?.encoding ||
-              webmCandidate?.encoding ||
-              resolvedCodec;
-          }
-        }
-      }
-    } catch {
-      // Proceed to probe /latest_version?id=VIDEO_ID&itag=18&local=true directly
+    const res = await fetchWithTimeout(endpoint, 6000, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      logs.push(`${instance.name}: HTTP ${res.status}`);
+      throw new Error(`HTTP ${res.status}`);
     }
 
-    const probe = await fetchWithTimeout(resolvedMp4, 6000, {
+    const data = (await res.json()) as InvidiousResponse;
+    if (data.error) {
+      logs.push(`${instance.name}: ${data.error}`);
+      throw new Error(data.error);
+    }
+
+    const formatStreams = data.formatStreams || [];
+    const adaptiveFormats = data.adaptiveFormats || [];
+
+    const muxedMp4 = formatStreams.find(
+      (f) =>
+        f.url &&
+        (String(f.itag) === '18' ||
+          f.container === 'mp4' ||
+          f.type?.includes('video/mp4'))
+    );
+
+    const webmCandidate = formatStreams.find(
+      (f) =>
+        f.url && (f.container === 'webm' || f.type?.includes('video/webm'))
+    );
+
+    const audioCandidate = adaptiveFormats.find(
+      (f) =>
+        f.url &&
+        (f.type?.includes('audio/mp4') ||
+          f.type?.includes('audio/webm') ||
+          f.type?.includes('audio/'))
+    );
+
+    if (!muxedMp4?.url && !webmCandidate?.url) {
+      logs.push(`${instance.name}: Sem formatStreams disponíveis.`);
+      throw new Error('No formatStreams');
+    }
+
+    const resolvedMp4 = muxedMp4?.url
+      ? withLocalCorsParam(muxedMp4.url, instance.baseUrl)
+      : '';
+    const resolvedWebm = webmCandidate?.url
+      ? withLocalCorsParam(webmCandidate.url, instance.baseUrl)
+      : '';
+    const resolvedAudio = muxedMp4?.url
+      ? resolvedMp4
+      : audioCandidate?.url
+      ? withLocalCorsParam(audioCandidate.url, instance.baseUrl)
+      : resolvedWebm;
+
+    const probeUrl = resolvedMp4 || resolvedWebm;
+    const probe = await fetchWithTimeout(probeUrl, 6000, {
       headers: { Range: 'bytes=0-32767' },
     });
     const contentType = (probe.headers.get('content-type') || '').toLowerCase();
@@ -387,7 +372,7 @@ async function querySingleInstance(
       contentType.includes('application/json')
     ) {
       logs.push(
-        `${instance.name} /latest_version: HTTP ${probe.status} (${
+        `${instance.name} stream: HTTP ${probe.status} (${
           contentType || 'no-video'
         })`
       );
@@ -395,16 +380,19 @@ async function querySingleInstance(
     }
 
     logs.push(
-      `${instance.name}: /latest_version?id=${normalizedId}&itag=18&local=true ativo.`
+      `${instance.name}: Stream YouTube (${normalizedId}) local=true ativo.`
     );
     return {
       videoId: normalizedId,
       youtubeUrl,
-      title: resolvedTitle,
+      title: data.title,
       webmUrl: resolvedWebm,
       mp4Url: resolvedMp4,
       audioUrl: resolvedAudio,
-      codecLabel: resolvedCodec,
+      codecLabel:
+        muxedMp4?.encoding ||
+        webmCandidate?.encoding ||
+        'itag=18 H.264 / AAC (local=true)',
       instanceName: `${instance.name} • YouTube (${normalizedId})`,
       isFallback: false,
       logs,
@@ -412,56 +400,85 @@ async function querySingleInstance(
   }
 }
 
+const inFlightResolutions = new Map<string, Promise<ResolvedCorsStream>>();
+const recentResolutionCache = new Map<
+  string,
+  { expiresAt: number; result: ResolvedCorsStream }
+>();
+
 export async function resolveCorsStreamsForVideo(
   videoId: string,
   preferredInstanceId?: string,
-  customInstanceUrl?: string
+  customInstanceUrl?: string,
+  forceRefresh = false
 ): Promise<ResolvedCorsStream> {
   const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
-  const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
-  const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
-  const logs: string[] = [`Source YouTube URL: ${youtubeUrl}`];
-  const instancesToTry: PublicStreamInstance[] = [];
+  const cacheKey = `${normalizedId}|${preferredInstanceId || ''}|${
+    customInstanceUrl || ''
+  }`;
 
-  if (customInstanceUrl && customInstanceUrl.trim()) {
-    const cleaned = customInstanceUrl.trim().replace(/\/+$/, '');
-    const isPiped = cleaned.includes('piped');
-    instancesToTry.push({
-      id: 'custom-instance',
-      name: `Custom (${cleaned})`,
-      type: isPiped ? 'piped' : 'invidious',
-      baseUrl: cleaned,
-    });
-  }
-
-  if (preferredInstanceId) {
-    const found = PUBLIC_CORS_INSTANCES.find(
-      (inst) => inst.id === preferredInstanceId
-    );
-    if (found) {
-      instancesToTry.push(found);
+  if (!forceRefresh) {
+    const inFlight = inFlightResolutions.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
+    }
+    const cached = recentResolutionCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.result;
     }
   }
 
-  for (const inst of PUBLIC_CORS_INSTANCES) {
-    if (!instancesToTry.some((i) => i.id === inst.id)) {
-      instancesToTry.push(inst);
-    }
-  }
+  const task = (async (): Promise<ResolvedCorsStream> => {
+    const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
+    const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
+    const logs: string[] = [`Source YouTube URL: ${youtubeUrl}`];
+    const instancesToTry: PublicStreamInstance[] = [];
 
-  try {
-    const winner = await Promise.any(
-      instancesToTry.map((inst) =>
-        querySingleInstance(inst, normalizedId, logs)
-      )
-    );
-    return winner;
-  } catch {
+    if (customInstanceUrl && customInstanceUrl.trim()) {
+      const cleaned = customInstanceUrl.trim().replace(/\/+$/, '');
+      const isPiped = cleaned.includes('piped');
+      instancesToTry.push({
+        id: 'custom-instance',
+        name: `Custom (${cleaned})`,
+        type: isPiped ? 'piped' : 'invidious',
+        baseUrl: cleaned,
+      });
+    }
+
+    if (preferredInstanceId) {
+      const found = PUBLIC_CORS_INSTANCES.find(
+        (inst) => inst.id === preferredInstanceId
+      );
+      if (found) {
+        instancesToTry.push(found);
+      }
+    }
+
+    for (const inst of PUBLIC_CORS_INSTANCES) {
+      if (!instancesToTry.some((i) => i.id === inst.id)) {
+        instancesToTry.push(inst);
+      }
+    }
+
+    // Try instances sequentially (max 3) to avoid flooding the browser network queue
+    for (const inst of instancesToTry.slice(0, 3)) {
+      try {
+        const winner = await querySingleInstance(inst, normalizedId, logs);
+        recentResolutionCache.set(cacheKey, {
+          expiresAt: Date.now() + 15000,
+          result: winner,
+        });
+        return winner;
+      } catch {
+        // try next instance
+      }
+    }
+
     if (catalogEntry) {
       logs.push(
         `Stream YouTube (${normalizedId}) servido via proxy CORS embarcado (itag=18 H.264 + VP8 WebM).`
       );
-      return {
+      const catalogResult: ResolvedCorsStream = {
         videoId: normalizedId,
         youtubeUrl,
         title: catalogEntry.title,
@@ -473,12 +490,17 @@ export async function resolveCorsStreamsForVideo(
         isFallback: false,
         logs,
       };
+      recentResolutionCache.set(cacheKey, {
+        expiresAt: Date.now() + 15000,
+        result: catalogResult,
+      });
+      return catalogResult;
     }
 
     logs.push(
       `Todas as instâncias públicas CORS falharam ou retornaram bloqueio para o vídeo (${normalizedId}).`
     );
-    return {
+    const failedResult: ResolvedCorsStream = {
       videoId: normalizedId,
       youtubeUrl,
       title: undefined,
@@ -490,5 +512,17 @@ export async function resolveCorsStreamsForVideo(
       isFallback: true,
       logs,
     };
+    recentResolutionCache.set(cacheKey, {
+      expiresAt: Date.now() + 10000,
+      result: failedResult,
+    });
+    return failedResult;
+  })();
+
+  inFlightResolutions.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    inFlightResolutions.delete(cacheKey);
   }
 }

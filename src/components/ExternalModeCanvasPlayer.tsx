@@ -402,13 +402,18 @@ export const ExternalModeCanvasPlayer = forwardRef<
       [mountOgvStream, selectedInstanceId, teardownOgvPlayer, videoId]
     );
 
+    const resolveAndPlayExternalRef = useRef(resolveAndPlayExternal);
     useEffect(() => {
-      resolveAndPlayExternal();
+      resolveAndPlayExternalRef.current = resolveAndPlayExternal;
+    }, [resolveAndPlayExternal]);
+
+    useEffect(() => {
+      resolveAndPlayExternalRef.current();
       return () => {
         sessionIdRef.current += 1;
         teardownOgvPlayer();
       };
-    }, [resolveAndPlayExternal, teardownOgvPlayer]);
+    }, [videoId, teardownOgvPlayer]);
 
     // Sync Play/Pause state from parent deck
     useEffect(() => {
