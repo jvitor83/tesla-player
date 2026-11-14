@@ -46,6 +46,28 @@ export const PUBLIC_CORS_INSTANCES: PublicStreamInstance[] = [
   },
 ];
 
+export const CF_WORKER_URL_STORAGE_KEY = 'tesla_player_cf_worker_url';
+
+export function getSavedCloudflareWorkerUrl(): string {
+  try {
+    return (localStorage.getItem(CF_WORKER_URL_STORAGE_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function setSavedCloudflareWorkerUrl(url: string): void {
+  try {
+    if (url.trim()) {
+      localStorage.setItem(CF_WORKER_URL_STORAGE_KEY, url.trim().replace(/\/+$/, ''));
+    } else {
+      localStorage.removeItem(CF_WORKER_URL_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export interface CatalogStreamEntry {
   videoId: string;
   title: string;
@@ -432,6 +454,49 @@ export async function resolveCorsStreamsForVideo(
     const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
     const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
     const logs: string[] = [`Source YouTube URL: ${youtubeUrl}`];
+    const cfWorkerUrl = getSavedCloudflareWorkerUrl();
+
+    // 1. If user configured a Cloudflare Worker Gateway, prioritize it!
+    if (cfWorkerUrl) {
+      try {
+        logs.push(`Consultando Cloudflare Worker Gateway: ${cfWorkerUrl}/info?id=${normalizedId}`);
+        const cfRes = await fetchWithTimeout(`${cfWorkerUrl}/info?id=${normalizedId}`, 6000, {
+          headers: { Accept: 'application/json' },
+        });
+        if (cfRes.ok) {
+          const cfData = (await cfRes.json()) as {
+            title?: string;
+            mp4StreamUrl?: string;
+            audioUrl?: string;
+            codec?: string;
+            source?: string;
+          };
+          if (cfData.mp4StreamUrl) {
+            logs.push(`Cloudflare Worker resolveu com sucesso: ${cfData.mp4StreamUrl}`);
+            const cfResult: ResolvedCorsStream = {
+              videoId: normalizedId,
+              youtubeUrl,
+              title: cfData.title || `YouTube (${normalizedId})`,
+              webmUrl: cfData.mp4StreamUrl,
+              mp4Url: cfData.mp4StreamUrl,
+              audioUrl: cfData.audioUrl || cfData.mp4StreamUrl,
+              codecLabel: cfData.codec || 'itag=18 H.264 / AAC (Cloudflare Worker)',
+              instanceName: 'Cloudflare Worker Gateway',
+              isFallback: false,
+              logs,
+            };
+            recentResolutionCache.set(cacheKey, {
+              expiresAt: Date.now() + 30000,
+              result: cfResult,
+            });
+            return cfResult;
+          }
+        }
+      } catch (cfErr) {
+        logs.push(`Cloudflare Worker falhou: ${cfErr instanceof Error ? cfErr.message : String(cfErr)}`);
+      }
+    }
+
     const instancesToTry: PublicStreamInstance[] = [];
 
     if (customInstanceUrl && customInstanceUrl.trim()) {

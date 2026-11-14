@@ -11,6 +11,7 @@ import { Cpu, RefreshCw, Radio } from 'lucide-react';
 import {
   resolveCorsStreamsForVideo,
   getStreamForYouTubeVideoId,
+  getSavedCloudflareWorkerUrl,
 } from '../services/corsStreamResolver';
 import { WebGLYuvRenderer } from '../utils/webglYuvRenderer';
 
@@ -767,7 +768,35 @@ export const LocalModeCanvasPlayer = forwardRef<
           return;
         }
 
-        // 2. Check if videoId is one of the 8 pre-packaged catalog streams
+        const cfWorkerUrl = getSavedCloudflareWorkerUrl();
+
+        // 2. If Cloudflare Worker Gateway is configured, resolve dynamic stream for ANY videoId immediately!
+        if (cfWorkerUrl) {
+          setSourceLabel(`youtube.com/watch?v=${videoId} (Cloudflare Worker)`);
+          setStatusText(
+            `Conectando stream YouTube (${videoId}) via Cloudflare Worker Gateway...`
+          );
+          const resolved = await resolveCorsStreamsForVideo(videoId);
+          if (sessionId !== loadSessionIdRef.current) return;
+
+          if (!resolved.isFallback && resolved.mp4Url) {
+            const ok = await streamAndDemuxMp4Url(
+              resolved.mp4Url,
+              resolved.audioUrl || resolved.mp4Url,
+              `youtube.com/watch?v=${videoId} (${resolved.instanceName})`,
+              sessionId
+            );
+            if (!ok && sessionId === loadSessionIdRef.current) {
+              setIsBufferingStream(false);
+              setStreamError(
+                `Não foi possível extrair átomos H.264 do stream (${videoId}) via Cloudflare Worker.`
+              );
+            }
+            return;
+          }
+        }
+
+        // 3. Check if videoId is one of the 8 pre-packaged catalog streams
         const catalogEntry = getStreamForYouTubeVideoId(videoId);
         if (catalogEntry) {
           setSourceLabel(`youtube.com/watch?v=${videoId} (itag=18)`);
@@ -786,7 +815,7 @@ export const LocalModeCanvasPlayer = forwardRef<
           return;
         }
 
-        // 3. User selected a video from their logged-in playlist, liked videos, subscriptions, or search:
+        // 4. User selected a video from their logged-in playlist, liked videos, subscriptions, or search:
         // NEVER play a default catalog video! Resolve the exact YouTube videoId via CORS instances.
         setSourceLabel(`youtube.com/watch?v=${videoId} (itag=18 CORS)`);
         setStatusText(

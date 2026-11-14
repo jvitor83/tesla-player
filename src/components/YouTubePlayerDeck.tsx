@@ -19,6 +19,7 @@ import {
   Layers,
   Globe,
   MonitorPlay,
+  Cloud,
 } from 'lucide-react';
 import type {
   YouTubeVideo,
@@ -35,6 +36,10 @@ import {
   type CanvasPlayerHandle,
 } from './LocalModeCanvasPlayer';
 import { ExternalModeCanvasPlayer } from './ExternalModeCanvasPlayer';
+import {
+  getSavedCloudflareWorkerUrl,
+  setSavedCloudflareWorkerUrl,
+} from '../services/corsStreamResolver';
 
 declare global {
   interface Window {
@@ -148,6 +153,13 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   const [showQueueDrawer, setShowQueueDrawer] = useState<boolean>(false);
   const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
   const [apiReady, setApiReady] = useState<boolean>(Boolean(window.YT?.Player));
+  const [showCfModal, setShowCfModal] = useState<boolean>(false);
+  const [cfWorkerUrlInput, setCfWorkerUrlInput] = useState<string>(() =>
+    getSavedCloudflareWorkerUrl()
+  );
+  const [cfWorkerActive, setCfWorkerActive] = useState<boolean>(() =>
+    Boolean(getSavedCloudflareWorkerUrl())
+  );
 
   const onNextVideoRef = useRef(onNextVideo);
   const autoContinuousPlayRef = useRef(autoContinuousPlay);
@@ -596,6 +608,19 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
 
         <div className="player-deck__top-actions">
           <button
+            id="btn-open-cf-worker-settings"
+            type="button"
+            className={`touch-pill-btn ${
+              cfWorkerActive ? 'touch-pill-btn--mode-local' : ''
+            }`}
+            onClick={() => setShowCfModal(true)}
+            title="Configurar Cloudflare Worker Gateway para desbloquear streaming direto do YouTube"
+          >
+            <Cloud size={13} />
+            <span>{cfWorkerActive ? 'Cloudflare Ativo' : 'Cloudflare Worker'}</span>
+          </button>
+
+          <button
             id="btn-maximize-css-viewport"
             type="button"
             className={`touch-pill-btn touch-pill-btn--primary ${
@@ -878,6 +903,81 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
                 </button>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Cloudflare Worker Gateway Modal */}
+      {showCfModal && (
+        <div
+          className="cf-modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowCfModal(false);
+          }}
+        >
+          <div className="cf-modal-card">
+            <div className="cf-modal-header">
+              <div className="cf-modal-title">
+                <Cloud size={20} className="cf-modal-icon" />
+                <h3>Cloudflare Worker Gateway</h3>
+              </div>
+              <button
+                type="button"
+                className="cf-modal-close-btn"
+                onClick={() => setShowCfModal(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="cf-modal-desc">
+              O Cloudflare Worker contorna o bloqueio de bot do YouTube e injeta cabeçalhos CORS, permitindo que qualquer vídeo seja reproduzido no modo <strong>Backendless</strong> ou <strong>External</strong> no Tesla sem usar a tag &lt;video&gt;.
+            </p>
+
+            <div className="cf-modal-form-group">
+              <label htmlFor="cf-worker-url-input">URL do seu Worker Cloudflare:</label>
+              <input
+                id="cf-worker-url-input"
+                type="url"
+                placeholder="https://tesla-player-stream.seu-subdominio.workers.dev"
+                value={cfWorkerUrlInput}
+                onChange={(e) => setCfWorkerUrlInput(e.target.value)}
+                className="cf-modal-input"
+              />
+              <span className="cf-modal-hint">
+                Consulte o arquivo <code>cloudflare-worker/README.md</code> para o passo a passo de implantação em 2 minutos (plano grátis).
+              </span>
+            </div>
+
+            <div className="cf-modal-actions">
+              <button
+                type="button"
+                className="touch-pill-btn touch-pill-btn--danger"
+                onClick={() => {
+                  setSavedCloudflareWorkerUrl('');
+                  setCfWorkerUrlInput('');
+                  setCfWorkerActive(false);
+                  setShowCfModal(false);
+                  forceVideoDecoderResync(false);
+                }}
+              >
+                Remover Gateway
+              </button>
+
+              <button
+                type="button"
+                className="touch-pill-btn touch-pill-btn--primary"
+                onClick={() => {
+                  const cleaned = cfWorkerUrlInput.trim().replace(/\/+$/, '');
+                  setSavedCloudflareWorkerUrl(cleaned);
+                  setCfWorkerActive(Boolean(cleaned));
+                  setShowCfModal(false);
+                  forceVideoDecoderResync(false);
+                }}
+              >
+                Salvar & Conectar
+              </button>
+            </div>
           </div>
         </div>
       )}
