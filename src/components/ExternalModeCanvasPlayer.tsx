@@ -7,7 +7,11 @@ import {
   forwardRef,
 } from 'react';
 import { Globe, RefreshCw, Server, Terminal } from 'lucide-react';
-import type { CanvasPlayerHandle } from './LocalModeCanvasPlayer';
+import {
+  LocalModeCanvasPlayer,
+  type CanvasPlayerHandle,
+  type ExternalMp4StreamOverride,
+} from './LocalModeCanvasPlayer';
 import {
   PUBLIC_CORS_INSTANCES,
   resolveCorsStreamsForVideo,
@@ -83,6 +87,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
   ) => {
     const mountContainerRef = useRef<HTMLDivElement | null>(null);
     const ogvPlayerRef = useRef<OGVPlayerElement | null>(null);
+    const mp4SubPlayerRef = useRef<CanvasPlayerHandle | null>(null);
     const auxAudioRef = useRef<HTMLAudioElement | null>(null);
     const sessionIdRef = useRef<number>(0);
 
@@ -101,6 +106,10 @@ export const ExternalModeCanvasPlayer = forwardRef<
     const [resolverLogs, setResolverLogs] = useState<string[]>([]);
     const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
     const [durationSec, setDurationSec] = useState<number>(0);
+    const [mp4StreamOverride, setMp4StreamOverride] =
+      useState<ExternalMp4StreamOverride | null>(null);
+    const [isResolvingCors, setIsResolvingCors] = useState<boolean>(false);
+    const [externalError, setExternalError] = useState<string | null>(null);
 
     const isPlayingRef = useRef<boolean>(isPlaying);
     const isMutedRef = useRef<boolean>(isMuted);
@@ -128,6 +137,31 @@ export const ExternalModeCanvasPlayer = forwardRef<
       videoTitle,
     ]);
 
+    const teardownOgvPlayer = useCallback(() => {
+      if (ogvPlayerRef.current) {
+        try {
+          ogvPlayerRef.current.pause();
+          if (ogvPlayerRef.current.stop) {
+            ogvPlayerRef.current.stop();
+          }
+        } catch {
+          // ignore
+        }
+        ogvPlayerRef.current = null;
+      }
+      if (mountContainerRef.current) {
+        mountContainerRef.current.innerHTML = '';
+      }
+      if (auxAudioRef.current) {
+        try {
+          auxAudioRef.current.pause();
+          auxAudioRef.current.removeAttribute('src');
+        } catch {
+          // ignore
+        }
+      }
+    }, []);
+
     const mountOgvStream = useCallback(
       async (
         streamUrl: string,
@@ -135,8 +169,9 @@ export const ExternalModeCanvasPlayer = forwardRef<
         instanceLabel: string,
         codec: string,
         sessionId: number,
-        fallbackWebmUrl?: string
+        fallbackMp4Override?: ExternalMp4StreamOverride
       ) => {
+        setMp4StreamOverride(null);
         await ensureOgvRuntimeLoaded();
         if (
           sessionId !== sessionIdRef.current ||
@@ -146,17 +181,9 @@ export const ExternalModeCanvasPlayer = forwardRef<
           return;
         }
 
-        if (ogvPlayerRef.current) {
-          try {
-            ogvPlayerRef.current.pause();
-            if (ogvPlayerRef.current.stop) {
-              ogvPlayerRef.current.stop();
-            }
-          } catch {
-            // ignore
-          }
-        }
-        mountContainerRef.current.innerHTML = '';
+        teardownOgvPlayer();
+        setIsResolvingCors(false);
+        setExternalError(null);
 
         const player = new window.OGVPlayer({
           webGL: true,
@@ -200,16 +227,13 @@ export const ExternalModeCanvasPlayer = forwardRef<
         });
 
         player.addEventListener('error', () => {
-          if (fallbackWebmUrl && sessionId === sessionIdRef.current) {
-            mountOgvStream(
-              fallbackWebmUrl,
-              undefined,
-              `YouTube Stream (${videoId})`,
-              'VP8 + Vorbis WASM Worker',
-              sessionId,
-              undefined
-            );
+          if (fallbackMp4Override && sessionId === sessionIdRef.current) {
+            teardownOgvPlayer();
+            setMp4StreamOverride(fallbackMp4Override);
           } else {
+            setExternalError(
+              `Erro ao decodificar stream WebM (${videoId}) no WASM Worker.`
+            );
             setStatusText(
               `Erro ao decodificar stream (${videoId}) no WASM Worker.`
             );
@@ -240,16 +264,24 @@ export const ExternalModeCanvasPlayer = forwardRef<
           }
         }
       },
-      [videoId]
+      [teardownOgvPlayer, videoId]
     );
 
     const resolveAndPlayExternal = useCallback(
       async (overrideInstanceId?: string, customUrl?: string) => {
         const sessionId = ++sessionIdRef.current;
         const targetInst = overrideInstanceId || selectedInstanceId;
+
+        // Immediately stop any previous video so the old video never keeps playing
+        teardownOgvPlayer();
+        setMp4StreamOverride(null);
+        setCurrentTimeSec(0);
+        setDurationSec(0);
+        setExternalError(null);
+        setIsResolvingCors(true);
         onPlayStateChangeRef.current(true);
 
-        const streamEntry = getStreamForYouTubeVideoId(videoId);
+        const catalogEntry = getStreamForYouTubeVideoId(videoId);
 
         if (
           customUrl &&
@@ -261,30 +293,43 @@ export const ExternalModeCanvasPlayer = forwardRef<
             undefined,
             `YouTube (${videoId}) • Custom Stream`,
             'VP8/VP9 WASM Worker',
-            sessionId,
-            streamEntry.webmUrl
+            sessionId
           );
           return;
         }
 
-        // Start the selected YouTube video's stream immediately onto WebGL <canvas> + <audio>
-        await mountOgvStream(
-          streamEntry.webmUrl,
-          undefined,
-          `youtube.com/watch?v=${videoId} (CORS Proxy)`,
-          'VP8 + Vorbis WASM Worker',
-          sessionId,
-          undefined
-        );
+        if (customUrl && customUrl.endsWith('.mp4')) {
+          setResolverLogs([`Stream MP4 direto: ${customUrl}`]);
+          setIsResolvingCors(false);
+          setActiveInstanceName(`YouTube (${videoId}) • Custom MP4 Stream`);
+          setMp4StreamOverride({
+            mp4Url: customUrl,
+            audioUrl: customUrl,
+            instanceName: 'Custom MP4 CORS',
+          });
+          return;
+        }
 
-        setStatusText(
-          `Streaming "${videoTitleRef.current.slice(
-            0,
-            34
-          )}" (${videoId}) via Invidious / Piped CORS + WASM...`
-        );
+        // If videoId is one of the 8 pre-packaged catalog streams, start its WebM stream while checking CORS
+        if (catalogEntry) {
+          await mountOgvStream(
+            catalogEntry.webmUrl,
+            undefined,
+            `youtube.com/watch?v=${videoId} (CORS Proxy)`,
+            'VP8 + Vorbis WASM Worker',
+            sessionId
+          );
+        } else {
+          setActiveInstanceName(`youtube.com/watch?v=${videoId}`);
+          setStatusText(
+            `Consultando Invidious (?local=true) / Piped CORS para "${videoTitleRef.current.slice(
+              0,
+              34
+            )}" (${videoId})...`
+          );
+        }
 
-        // Query public Invidious (?local=true) / Piped CORS APIs for this videoId
+        // Query public Invidious (?local=true) / Piped CORS APIs for this exact videoId
         const resolved = await resolveCorsStreamsForVideo(
           videoId,
           targetInst,
@@ -292,48 +337,73 @@ export const ExternalModeCanvasPlayer = forwardRef<
         );
         if (sessionId !== sessionIdRef.current) return;
         setResolverLogs(resolved.logs);
+        setIsResolvingCors(false);
 
-        if (
-          !resolved.isFallback &&
-          resolved.webmUrl &&
-          resolved.webmUrl !== streamEntry.webmUrl
-        ) {
-          await mountOgvStream(
-            resolved.webmUrl,
-            resolved.audioUrl,
-            resolved.instanceName,
-            resolved.codecLabel,
-            sessionId,
-            streamEntry.webmUrl
-          );
-        } else {
-          setActiveInstanceName(
-            `youtube.com/watch?v=${videoId} • ${resolved.instanceName}`
+        if (!resolved.isFallback) {
+          // Live Piped / Invidious instances return muxed itag=18 MP4 (or WebM)
+          if (resolved.mp4Url && ! catalogEntry) {
+            teardownOgvPlayer();
+            setActiveInstanceName(resolved.instanceName);
+            setCodecBadge(resolved.codecLabel || 'itag=18 H.264 WASM');
+            setMp4StreamOverride({
+              mp4Url: resolved.mp4Url,
+              audioUrl: resolved.audioUrl || resolved.mp4Url,
+              instanceName: resolved.instanceName,
+            });
+            return;
+          }
+
+          if (resolved.webmUrl) {
+            await mountOgvStream(
+              resolved.webmUrl,
+              resolved.audioUrl,
+              resolved.instanceName,
+              resolved.codecLabel,
+              sessionId,
+              resolved.mp4Url
+                ? {
+                    mp4Url: resolved.mp4Url,
+                    audioUrl: resolved.audioUrl || resolved.mp4Url,
+                    instanceName: resolved.instanceName,
+                  }
+                : undefined
+            );
+            return;
+          }
+
+          if (resolved.mp4Url) {
+            teardownOgvPlayer();
+            setActiveInstanceName(resolved.instanceName);
+            setCodecBadge(resolved.codecLabel || 'itag=18 H.264 WASM');
+            setMp4StreamOverride({
+              mp4Url: resolved.mp4Url,
+              audioUrl: resolved.audioUrl || resolved.mp4Url,
+              instanceName: resolved.instanceName,
+            });
+            return;
+          }
+        }
+
+        // If all external instances failed and this is NOT one of the 8 catalog videos, NEVER play a default video!
+        if (!catalogEntry) {
+          setExternalError(
+            `As instâncias públicas Invidious / Piped bloquearam ou limitaram temporariamente a extração CORS para "${videoTitleRef.current}" (${videoId}).`
           );
           setStatusText(
-            `Reproduzindo YouTube (${videoId}) no <canvas> + <audio> via WASM Worker`
+            `Stream CORS indisponível para (${videoId}). Tente outra instância no seletor acima ou clique em Reconectar.`
           );
         }
       },
-      [mountOgvStream, selectedInstanceId, videoId]
+      [mountOgvStream, selectedInstanceId, teardownOgvPlayer, videoId]
     );
 
     useEffect(() => {
       resolveAndPlayExternal();
       return () => {
         sessionIdRef.current += 1;
-        if (ogvPlayerRef.current) {
-          try {
-            ogvPlayerRef.current.pause();
-            if (ogvPlayerRef.current.stop) {
-              ogvPlayerRef.current.stop();
-            }
-          } catch {
-            // ignore
-          }
-        }
+        teardownOgvPlayer();
       };
-    }, [resolveAndPlayExternal]);
+    }, [resolveAndPlayExternal, teardownOgvPlayer]);
 
     // Sync Play/Pause state from parent deck
     useEffect(() => {
@@ -371,10 +441,18 @@ export const ExternalModeCanvasPlayer = forwardRef<
       ref,
       () => ({
         togglePlay: () => {
+          if (mp4StreamOverride && mp4SubPlayerRef.current) {
+            mp4SubPlayerRef.current.togglePlay();
+            return;
+          }
           const next = !isPlayingRef.current;
           onPlayStateChangeRef.current(next);
         },
         seekBy: (deltaSeconds: number) => {
+          if (mp4StreamOverride && mp4SubPlayerRef.current) {
+            mp4SubPlayerRef.current.seekBy(deltaSeconds);
+            return;
+          }
           const player = ogvPlayerRef.current;
           if (!player) return;
           try {
@@ -391,6 +469,10 @@ export const ExternalModeCanvasPlayer = forwardRef<
           }
         },
         toggleMute: () => {
+          if (mp4StreamOverride && mp4SubPlayerRef.current) {
+            mp4SubPlayerRef.current.toggleMute();
+            return;
+          }
           const next = !isMutedRef.current;
           onMuteStateChangeRef.current(next);
         },
@@ -398,7 +480,12 @@ export const ExternalModeCanvasPlayer = forwardRef<
           resolveAndPlayExternal(selectedInstanceId, customEndpointInput);
         },
       }),
-      [customEndpointInput, resolveAndPlayExternal, selectedInstanceId]
+      [
+        customEndpointInput,
+        mp4StreamOverride,
+        resolveAndPlayExternal,
+        selectedInstanceId,
+      ]
     );
 
     const formatTime = (sec: number) => {
@@ -512,13 +599,92 @@ export const ExternalModeCanvasPlayer = forwardRef<
           </div>
         )}
 
-        {/* OGV.js WebAssembly <canvas> Mount Host (No <video> tag) */}
-        <div
-          ref={mountContainerRef}
-          id="ogv-wasm-stage-mount"
-          className="canvas-mode-stage__ogv-mount"
-          onClick={() => onPlayStateChangeRef.current(!isPlayingRef.current)}
-        />
+        {/* When Piped/Invidious returns an itag=18 MP4 stream, decode via MP4Box.js + WASM Worker onto WebGL <canvas> + <audio> */}
+        {mp4StreamOverride ? (
+          <LocalModeCanvasPlayer
+            ref={mp4SubPlayerRef}
+            videoId={videoId}
+            videoTitle={videoTitle}
+            isPlaying={isPlaying}
+            isMuted={isMuted}
+            autoContinuousPlay={autoContinuousPlay}
+            onPlayStateChange={onPlayStateChange}
+            onMuteStateChange={onMuteStateChange}
+            onEnded={onEnded}
+            externalStreamOverride={mp4StreamOverride}
+            hideHud={true}
+            onTelemetryUpdate={(info) => {
+              setCurrentTimeSec(info.currentTimeSec);
+              setDurationSec(info.durationSec);
+              setCodecBadge(info.codecLabel);
+              setStatusText(info.statusText);
+              setActiveInstanceName(info.sourceLabel);
+            }}
+          />
+        ) : (
+          <div
+            ref={mountContainerRef}
+            id="ogv-wasm-stage-mount"
+            className="canvas-mode-stage__ogv-mount"
+            onClick={() => onPlayStateChangeRef.current(!isPlayingRef.current)}
+          />
+        )}
+
+        {/* Loading or Error status overlay when resolving non-catalog YouTube streams */}
+        {!mp4StreamOverride && (isResolvingCors || externalError) && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '10px',
+              padding: '24px',
+              textAlign: 'center',
+              background: 'rgba(8, 11, 16, 0.82)',
+              pointerEvents: externalError ? 'auto' : 'none',
+              zIndex: 4,
+            }}
+          >
+            <div
+              style={{
+                fontSize: '14px',
+                fontWeight: 600,
+                color: '#f4f6fb',
+                maxWidth: '520px',
+              }}
+            >
+              {videoTitle} ({videoId})
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                color: externalError ? '#ff8a8a' : '#9fb0c7',
+                maxWidth: '540px',
+                lineHeight: 1.45,
+              }}
+            >
+              {externalError || statusText}
+            </div>
+            {externalError && (
+              <button
+                type="button"
+                className="canvas-hud-btn canvas-hud-btn--active"
+                onClick={() =>
+                  resolveAndPlayExternal(
+                    selectedInstanceId,
+                    customEndpointInput
+                  )
+                }
+              >
+                <RefreshCw size={12} />
+                <span>Tentar Novamente ({videoId})</span>
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Synchronized HTML5 <audio> element for adaptive streams */}
         <audio ref={auxAudioRef} preload="auto" style={{ display: 'none' }} />

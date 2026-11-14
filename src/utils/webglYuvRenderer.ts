@@ -50,8 +50,13 @@ export class WebGLYuvRenderer {
         uniform sampler2D u_textureV;
         uniform float u_cropRight;
         uniform float u_cropBottom;
+        uniform float u_isRgb;
         void main() {
           vec2 uv = vec2(v_texCoord.x * u_cropRight, v_texCoord.y * u_cropBottom);
+          if (u_isRgb > 0.5) {
+            gl_FragColor = texture2D(u_textureY, uv);
+            return;
+          }
           float y = texture2D(u_textureY, uv).r;
           float u = texture2D(u_textureU, uv).r - 0.5;
           float v = texture2D(u_textureV, uv).r - 0.5;
@@ -109,6 +114,7 @@ export class WebGLYuvRenderer {
       gl.uniform1i(gl.getUniformLocation(program, 'u_textureY'), 0);
       gl.uniform1i(gl.getUniformLocation(program, 'u_textureU'), 1);
       gl.uniform1i(gl.getUniformLocation(program, 'u_textureV'), 2);
+      gl.uniform1f(gl.getUniformLocation(program, 'u_isRgb'), 0.0);
 
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
@@ -154,6 +160,61 @@ export class WebGLYuvRenderer {
     return Boolean(this.gl && this.program);
   }
 
+  public clearFrame(): void {
+    if (this.gl) {
+      this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      this.gl.clearColor(0.03, 0.04, 0.06, 1.0);
+      this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+      return;
+    }
+    const ctx = this.canvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#080b10';
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+  }
+
+  public renderVideoFrame(
+    source: TexImageSource,
+    width: number,
+    height: number
+  ): void {
+    const w = Math.max(1, width);
+    const h = Math.max(1, height);
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+      this.imageDataCache = null;
+    }
+
+    if (this.gl && this.program && this.yTexture) {
+      const gl = this.gl;
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(this.program);
+      gl.uniform1f(gl.getUniformLocation(this.program, 'u_cropRight'), 1.0);
+      gl.uniform1f(gl.getUniformLocation(this.program, 'u_cropBottom'), 1.0);
+      gl.uniform1f(gl.getUniformLocation(this.program, 'u_isRgb'), 1.0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.yTexture);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        source
+      );
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return;
+    }
+
+    const ctx = this.canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(source as CanvasImageSource, 0, 0, w, h);
+    }
+  }
+
   public renderYuv420Frame(
     yuv: Uint8Array,
     strideWidth: number,
@@ -195,6 +256,7 @@ export class WebGLYuvRenderer {
         gl.getUniformLocation(this.program, 'u_cropBottom'),
         h / strideHeight
       );
+      gl.uniform1f(gl.getUniformLocation(this.program, 'u_isRgb'), 0.0);
 
       const yPlane = yuv.subarray(0, lumaSize);
       const uPlane = yuv.subarray(uOffset, uOffset + chromaSize);

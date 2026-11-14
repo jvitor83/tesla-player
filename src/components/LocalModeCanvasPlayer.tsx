@@ -21,6 +21,12 @@ export interface CanvasPlayerHandle {
   resync: () => void;
 }
 
+export interface ExternalMp4StreamOverride {
+  mp4Url: string;
+  audioUrl?: string;
+  instanceName: string;
+}
+
 interface LocalModeCanvasPlayerProps {
   videoId: string;
   videoTitle: string;
@@ -30,6 +36,15 @@ interface LocalModeCanvasPlayerProps {
   onPlayStateChange: (playing: boolean) => void;
   onMuteStateChange: (muted: boolean) => void;
   onEnded: () => void;
+  externalStreamOverride?: ExternalMp4StreamOverride | null;
+  hideHud?: boolean;
+  onTelemetryUpdate?: (info: {
+    currentTimeSec: number;
+    durationSec: number;
+    codecLabel: string;
+    statusText: string;
+    sourceLabel: string;
+  }) => void;
 }
 
 interface ExtractedVideoSample {
@@ -72,6 +87,9 @@ export const LocalModeCanvasPlayer = forwardRef<
       onPlayStateChange,
       onMuteStateChange,
       onEnded,
+      externalStreamOverride = null,
+      hideHud = false,
+      onTelemetryUpdate,
     },
     ref
   ) => {
@@ -86,6 +104,8 @@ export const LocalModeCanvasPlayer = forwardRef<
     const usingWebCodecsRef = useRef<boolean>(false);
 
     const samplesRef = useRef<ExtractedVideoSample[]>([]);
+    const isStreamCompleteRef = useRef<boolean>(false);
+    const firstPtsOffsetRef = useRef<number | null>(null);
     const spsAnnexBRef = useRef<Uint8Array[]>([]);
     const ppsAnnexBRef = useRef<Uint8Array[]>([]);
     const currentSampleIdxRef = useRef<number>(0);
@@ -109,6 +129,8 @@ export const LocalModeCanvasPlayer = forwardRef<
     const [fpsEstimate, setFpsEstimate] = useState<number>(30);
     const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
     const [durationSec, setDurationSec] = useState<number>(0);
+    const [streamError, setStreamError] = useState<string | null>(null);
+    const [isBufferingStream, setIsBufferingStream] = useState<boolean>(false);
 
     const isPlayingRef = useRef<boolean>(isPlaying);
     const isMutedRef = useRef<boolean>(isMuted);
@@ -116,6 +138,7 @@ export const LocalModeCanvasPlayer = forwardRef<
     const onPlayStateChangeRef = useRef(onPlayStateChange);
     const onMuteStateChangeRef = useRef(onMuteStateChange);
     const onEndedRef = useRef(onEnded);
+    const onTelemetryUpdateRef = useRef(onTelemetryUpdate);
     const videoTitleRef = useRef(videoTitle);
 
     useEffect(() => {
@@ -125,6 +148,7 @@ export const LocalModeCanvasPlayer = forwardRef<
       onPlayStateChangeRef.current = onPlayStateChange;
       onMuteStateChangeRef.current = onMuteStateChange;
       onEndedRef.current = onEnded;
+      onTelemetryUpdateRef.current = onTelemetryUpdate;
       videoTitleRef.current = videoTitle;
     }, [
       isPlaying,
@@ -133,7 +157,26 @@ export const LocalModeCanvasPlayer = forwardRef<
       onPlayStateChange,
       onMuteStateChange,
       onEnded,
+      onTelemetryUpdate,
       videoTitle,
+    ]);
+
+    useEffect(() => {
+      onTelemetryUpdateRef.current?.({
+        currentTimeSec,
+        durationSec,
+        codecLabel: `${dimensionsLabel} • ${fpsEstimate}fps • ${naluCounter} NALUs`,
+        statusText,
+        sourceLabel,
+      });
+    }, [
+      currentTimeSec,
+      durationSec,
+      dimensionsLabel,
+      fpsEstimate,
+      naluCounter,
+      statusText,
+      sourceLabel,
     ]);
 
     // Initialize WebGL YUV420 <canvas> renderer
@@ -326,18 +369,23 @@ export const LocalModeCanvasPlayer = forwardRef<
       [decodeSampleAtIndex]
     );
 
-    // Demux an MP4 (itag=18) ArrayBuffer with mp4box.js and stream NALUs to TinyH264 WASM Web Worker -> WebGL <canvas>
-    const demuxAndStartMp4Buffer = useCallback(
+    // Stream and demux an MP4 (itag=18) URL progressively with mp4box.js -> TinyH264 WASM Worker / WebCodecs -> WebGL <canvas>
+    const streamAndDemuxMp4Url = useCallback(
       async (
-        arrayBuffer: ArrayBuffer,
+        mp4Url: string,
         audioSourceUrl: string,
         label: string,
-        sessionId: number
+        sessionId: number,
+        maxBytes = 24 * 1024 * 1024
       ): Promise<boolean> => {
         if (sessionId !== loadSessionIdRef.current) return false;
 
+        const res = await fetch(mp4Url, { mode: 'cors' });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
         const mp4boxfile = createFile();
-        const extractedSamples: ExtractedVideoSample[] = [];
         let spsList: Uint8Array[] = [];
         let ppsList: Uint8Array[] = [];
         let avcDescriptionBytes: Uint8Array | null = null;
@@ -347,6 +395,11 @@ export const LocalModeCanvasPlayer = forwardRef<
         let trackWidth = 640;
         let trackHeight = 360;
         let totalNalCount = 0;
+        let playbackStarted = false;
+
+        samplesRef.current = [];
+        isStreamCompleteRef.current = false;
+        firstPtsOffsetRef.current = null;
 
         mp4boxfile.onReady = (info) => {
           const vTrack = info.videoTracks?.[0];
@@ -357,6 +410,12 @@ export const LocalModeCanvasPlayer = forwardRef<
           codecString = vTrack.codec || 'avc1.42E01E';
           trackWidth = vTrack.video?.width || vTrack.track_width || 640;
           trackHeight = vTrack.video?.height || vTrack.track_height || 360;
+
+          if (info.duration && info.timescale) {
+            setDurationSec(Math.max(1, info.duration / info.timescale));
+          } else if (vTrack.duration && vTrack.timescale) {
+            setDurationSec(Math.max(1, vTrack.duration / vTrack.timescale));
+          }
 
           const trak = mp4boxfile.getTrackById(vTrack.id);
           const entries = trak?.mdia?.minf?.stbl?.stsd?.entries || [];
@@ -402,13 +461,16 @@ export const LocalModeCanvasPlayer = forwardRef<
             }
           }
 
+          // nbSamples: 1 ensures mp4box.js emits samples immediately as chunks stream in
           mp4boxfile.setExtractionOptions(vTrack.id, null, {
-            nbSamples: 5000,
+            nbSamples: 1,
           });
           mp4boxfile.start();
         };
 
         mp4boxfile.onSamples = (_id, _user, samples) => {
+          if (sessionId !== loadSessionIdRef.current) return;
+
           for (const sample of samples) {
             if (!sample.data) continue;
             const data = sample.data;
@@ -436,8 +498,16 @@ export const LocalModeCanvasPlayer = forwardRef<
 
             if (sampleNalus.length > 0) {
               const timescale = sample.timescale || 1000;
-              extractedSamples.push({
-                ptsSec: (sample.cts ?? sample.dts ?? 0) / timescale,
+              const rawPts = (sample.dts ?? sample.cts ?? 0) / timescale;
+              if (firstPtsOffsetRef.current === null) {
+                firstPtsOffsetRef.current = rawPts > 0.2 ? rawPts : 0;
+              }
+              const normalizedPts = Math.max(
+                0,
+                rawPts - (firstPtsOffsetRef.current || 0)
+              );
+              samplesRef.current.push({
+                ptsSec: normalizedPts,
                 durationSec: (sample.duration || 33) / timescale,
                 isSync: Boolean(sample.is_sync),
                 avccData: new Uint8Array(data),
@@ -445,225 +515,335 @@ export const LocalModeCanvasPlayer = forwardRef<
               });
             }
           }
+
+          if (playbackStarted && samplesRef.current.length > 0) {
+            setNaluCounter(totalNalCount);
+            const last = samplesRef.current[samplesRef.current.length - 1];
+            const loadedDur = Math.max(0.5, last.ptsSec + last.durationSec);
+            setDurationSec((prev) => Math.max(prev, loadedDur));
+          }
         };
 
-        const mp4Buffer = MP4BoxBuffer.fromArrayBuffer(arrayBuffer, 0);
-        mp4boxfile.appendBuffer(mp4Buffer);
-        mp4boxfile.flush();
+        const initializeDecoderAndStartPlayback = async () => {
+          if (playbackStarted || sessionId !== loadSessionIdRef.current) return;
+          if (samplesRef.current.length === 0) return;
+          playbackStarted = true;
+          setIsBufferingStream(false);
+          setStreamError(null);
 
-        if (sessionId !== loadSessionIdRef.current) return false;
-        if (extractedSamples.length === 0) {
-          return false;
-        }
+          displaySizeRef.current = { width: trackWidth, height: trackHeight };
+          setDimensionsLabel(`${trackWidth}x${trackHeight}`);
+          spsAnnexBRef.current = spsList;
+          ppsAnnexBRef.current = ppsList;
+          setNaluCounter(totalNalCount);
 
-        extractedSamples.sort((a, b) => a.ptsSec - b.ptsSec);
-
-        const firstPts = extractedSamples[0].ptsSec;
-        if (firstPts > 0.2) {
-          for (const s of extractedSamples) {
-            s.ptsSec = Math.max(0, s.ptsSec - firstPts);
+          if (webCodecsDecoderRef.current) {
+            try {
+              webCodecsDecoderRef.current.close();
+            } catch {
+              // ignore
+            }
+            webCodecsDecoderRef.current = null;
           }
-        }
+          usingWebCodecsRef.current = false;
+          decodedCountRef.current = 0;
 
-        displaySizeRef.current = { width: trackWidth, height: trackHeight };
-        setDimensionsLabel(`${trackWidth}x${trackHeight}`);
-        spsAnnexBRef.current = spsList;
-        ppsAnnexBRef.current = ppsList;
-        samplesRef.current = extractedSamples;
-        setNaluCounter(totalNalCount);
-
-        if (webCodecsDecoderRef.current) {
-          try {
-            webCodecsDecoderRef.current.close();
-          } catch {
-            // ignore
-          }
-          webCodecsDecoderRef.current = null;
-        }
-        usingWebCodecsRef.current = false;
-        decodedCountRef.current = 0;
-
-        // Baseline profile (66) -> decode in TinyH264 C-to-WASM Web Worker and render to WebGL <canvas>
-        if (profileIndication === 66) {
-          await ensureTinyH264Worker();
-          if (sessionId !== loadSessionIdRef.current) return false;
-        } else if (
-          typeof window.VideoDecoder !== 'undefined' &&
-          avcDescriptionBytes
-        ) {
-          // If an external proxy returned Main/High profile CABAC (77/100), decode onto <canvas> via WebCodecs
-          try {
-            const support = await window.VideoDecoder.isConfigSupported({
-              codec: codecString,
-              codedWidth: trackWidth,
-              codedHeight: trackHeight,
-              description: avcDescriptionBytes,
-            });
-            if (support.supported) {
-              const wcDecoder = new window.VideoDecoder({
-                output: (videoFrame) => {
-                  decodedCountRef.current += 1;
-                  const canvas = canvasRef.current;
-                  if (canvas) {
-                    const fw = videoFrame.displayWidth || trackWidth;
-                    const fh = videoFrame.displayHeight || trackHeight;
-                    if (canvas.width !== fw || canvas.height !== fh) {
-                      canvas.width = fw;
-                      canvas.height = fh;
-                    }
-                    const ctx = canvas.getContext('2d');
-                    if (ctx) {
-                      ctx.drawImage(videoFrame, 0, 0, fw, fh);
-                    }
-                  }
-                  videoFrame.close();
-                },
-                error: () => undefined,
-              });
-              wcDecoder.configure({
+          // Prepare WebCodecs decoder when supported (for Main/High profile or if TinyH264 needs standby)
+          let wcReady = false;
+          if (
+            typeof window.VideoDecoder !== 'undefined' &&
+            avcDescriptionBytes
+          ) {
+            try {
+              const support = await window.VideoDecoder.isConfigSupported({
                 codec: codecString,
                 codedWidth: trackWidth,
                 codedHeight: trackHeight,
                 description: avcDescriptionBytes,
               });
-              webCodecsDecoderRef.current = wcDecoder;
-              usingWebCodecsRef.current = true;
+              if (support.supported) {
+                const wcDecoder = new window.VideoDecoder({
+                  output: (videoFrame) => {
+                    decodedCountRef.current += 1;
+                    if (!webglRendererRef.current && canvasRef.current) {
+                      webglRendererRef.current = new WebGLYuvRenderer(
+                        canvasRef.current
+                      );
+                    }
+                    const fw = videoFrame.displayWidth || trackWidth;
+                    const fh = videoFrame.displayHeight || trackHeight;
+                    webglRendererRef.current?.renderVideoFrame(
+                      videoFrame as unknown as TexImageSource,
+                      fw,
+                      fh
+                    );
+                    videoFrame.close();
+                  },
+                  error: () => undefined,
+                });
+                wcDecoder.configure({
+                  codec: codecString,
+                  codedWidth: trackWidth,
+                  codedHeight: trackHeight,
+                  description: avcDescriptionBytes,
+                });
+                webCodecsDecoderRef.current = wcDecoder;
+                wcReady = true;
+              }
+            } catch {
+              wcReady = false;
             }
+          }
+
+          if (profileIndication === 66) {
+            await ensureTinyH264Worker();
+            if (sessionId !== loadSessionIdRef.current) return;
+            // If a stream tagged profile 66 uses extended features not supported by tinyh264, switch to WebCodecs automatically
+            if (wcReady) {
+              window.setTimeout(() => {
+                if (
+                  sessionId === loadSessionIdRef.current &&
+                  decodedCountRef.current === 0 &&
+                  webCodecsDecoderRef.current?.state === 'configured'
+                ) {
+                  usingWebCodecsRef.current = true;
+                  decodeSampleAtIndex(0);
+                }
+              }, 450);
+            }
+          } else if (wcReady) {
+            usingWebCodecsRef.current = true;
+          } else {
+            await ensureTinyH264Worker();
+            if (sessionId !== loadSessionIdRef.current) return;
+          }
+
+          currentSampleIdxRef.current = 0;
+          pausedMediaTimeRef.current = 0;
+          clockStartRef.current = performance.now();
+
+          const last = samplesRef.current[samplesRef.current.length - 1];
+          const totalDur = Math.max(0.5, last.ptsSec + last.durationSec);
+          setDurationSec((prev) => Math.max(prev, totalDur));
+          setFpsEstimate(
+            Math.max(1, Math.round(samplesRef.current.length / totalDur))
+          );
+          setCurrentTimeSec(0);
+
+          decodeSampleAtIndex(0);
+          currentSampleIdxRef.current = 1;
+
+          const isWebGL = webglRendererRef.current?.isWebGLActive() ?? true;
+          setSourceLabel(label);
+          setStatusText(
+            `Streaming YouTube (${videoId}) • MP4Box.js + WASM Worker -> ${
+              isWebGL ? 'WebGL' : '2D'
+            } <canvas> @ 30fps + <audio>`
+          );
+
+          if (audioRef.current) {
+            audioRef.current.src = audioSourceUrl;
+            audioRef.current.muted = isMutedRef.current;
+            audioRef.current.currentTime = 0;
+            if (isPlayingRef.current) {
+              audioRef.current.play().catch(() => {
+                // <canvas> continues rendering via performance.now() clock even before user gesture
+              });
+            }
+          }
+        };
+
+        if (!res.body) {
+          const ab = await res.arrayBuffer();
+          if (sessionId !== loadSessionIdRef.current) return false;
+          const mp4Buf = MP4BoxBuffer.fromArrayBuffer(ab, 0);
+          mp4boxfile.appendBuffer(mp4Buf);
+          mp4boxfile.flush();
+          isStreamCompleteRef.current = true;
+          await initializeDecoderAndStartPlayback();
+          return samplesRef.current.length > 0;
+        }
+
+        const reader = res.body.getReader();
+        let fileOffset = 0;
+        try {
+          while (fileOffset < maxBytes) {
+            if (sessionId !== loadSessionIdRef.current) {
+              await reader.cancel().catch(() => undefined);
+              return false;
+            }
+            const { done, value } = await reader.read();
+            if (done || !value) break;
+
+            const copy = new Uint8Array(value.byteLength);
+            copy.set(value);
+            const mp4Buf = MP4BoxBuffer.fromArrayBuffer(
+              copy.buffer,
+              fileOffset
+            );
+            fileOffset += copy.byteLength;
+            mp4boxfile.appendBuffer(mp4Buf);
+
+            if (!playbackStarted && samplesRef.current.length >= 25) {
+              await initializeDecoderAndStartPlayback();
+            }
+          }
+        } finally {
+          isStreamCompleteRef.current = true;
+          try {
+            mp4boxfile.flush();
           } catch {
-            usingWebCodecsRef.current = false;
+            // ignore
+          }
+          try {
+            await reader.cancel();
+          } catch {
+            // ignore
           }
         }
 
-        // Reset playback clock to frame 0 and decode first frame immediately
-        currentSampleIdxRef.current = 0;
-        pausedMediaTimeRef.current = 0;
-        clockStartRef.current = performance.now();
-
-        const last = extractedSamples[extractedSamples.length - 1];
-        const totalDur = Math.max(0.5, last.ptsSec + last.durationSec);
-        setDurationSec(totalDur);
-        setFpsEstimate(
-          Math.max(1, Math.round(extractedSamples.length / totalDur))
-        );
-        setCurrentTimeSec(0);
-
-        decodeSampleAtIndex(0);
-        currentSampleIdxRef.current = 1;
-
-        const isWebGL = webglRendererRef.current?.isWebGLActive() ?? true;
-        setSourceLabel(label);
-        setStatusText(
-          `Streaming YouTube (${videoId}) • MP4Box.js + TinyH264 WASM Worker -> ${
-            isWebGL ? 'WebGL' : '2D'
-          } <canvas> @ 30fps + <audio>`
-        );
-
-        if (audioRef.current) {
-          audioRef.current.src = audioSourceUrl;
-          audioRef.current.muted = isMutedRef.current;
-          audioRef.current.currentTime = 0;
-          if (isPlayingRef.current) {
-            audioRef.current.play().catch(() => {
-              // <canvas> continues rendering via performance.now() clock even before user gesture
-            });
-          }
+        if (!playbackStarted && samplesRef.current.length > 0) {
+          await initializeDecoderAndStartPlayback();
         }
 
-        return true;
+        return samplesRef.current.length > 0;
       },
       [decodeSampleAtIndex, ensureTinyH264Worker, videoId]
     );
 
-    const fetchMp4BufferCapped = useCallback(
-      async (url: string, maxBytes = 6 * 1024 * 1024): Promise<ArrayBuffer> => {
-        const res = await fetch(url, { mode: 'cors' });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-        if (!res.body) {
-          return await res.arrayBuffer();
-        }
-        const reader = res.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let total = 0;
-        while (total < maxBytes) {
-          const { done, value } = await reader.read();
-          if (done || !value) break;
-          chunks.push(value);
-          total += value.byteLength;
-        }
+    // Stop previous playback and clear <canvas> + <audio> immediately when switching videos
+    const resetActivePlayback = useCallback(() => {
+      samplesRef.current = [];
+      isStreamCompleteRef.current = false;
+      currentSampleIdxRef.current = 0;
+      pausedMediaTimeRef.current = 0;
+      decodedCountRef.current = 0;
+      setCurrentTimeSec(0);
+      setDurationSec(0);
+      setNaluCounter(0);
+      setStreamError(null);
+      if (audioRef.current) {
         try {
-          await reader.cancel();
+          audioRef.current.pause();
+          audioRef.current.removeAttribute('src');
+          audioRef.current.load();
         } catch {
           // ignore
         }
-        const merged = new Uint8Array(total);
-        let offset = 0;
-        for (const c of chunks) {
-          merged.set(c, offset);
-          offset += c.byteLength;
-        }
-        return merged.buffer;
-      },
-      []
-    );
+      }
+      webglRendererRef.current?.clearFrame();
+    }, []);
 
     // Stream the selected YouTube video (youtube.com/watch?v=VIDEO_ID) into mp4box.js + tinyh264 Web Worker
     const startVideoSession = useCallback(async () => {
       const sessionId = ++loadSessionIdRef.current;
+      resetActivePlayback();
+      setIsBufferingStream(true);
       onPlayStateChangeRef.current(true);
 
       try {
-        const streamEntry = getStreamForYouTubeVideoId(videoId);
-        setSourceLabel(`youtube.com/watch?v=${videoId} (itag=18)`);
-        setStatusText(
-          `Conectando stream YouTube "${videoTitleRef.current.slice(
-            0,
-            38
-          )}" (${videoId})...`
-        );
-
-        // Stream the selected YouTube video's itag=18 H.264 MP4 over HTTP fetch()
-        const streamRes = await fetch(streamEntry.mp4Url);
-        const streamBuf = await streamRes.arrayBuffer();
-        await demuxAndStartMp4Buffer(
-          streamBuf,
-          streamEntry.mp4Url,
-          `youtube.com/watch?v=${videoId} (itag=18)`,
-          sessionId
-        );
-
-        // Also check live CORS Piped/Invidious instances in background for any non-catalog YouTube ID
-        if (streamEntry.videoId !== videoId) {
-          const resolved = await resolveCorsStreamsForVideo(videoId);
-          if (
-            sessionId === loadSessionIdRef.current &&
-            !resolved.isFallback &&
-            resolved.mp4Url
-          ) {
-            try {
-              const remoteBuf = await fetchMp4BufferCapped(resolved.mp4Url);
-              if (sessionId === loadSessionIdRef.current) {
-                await demuxAndStartMp4Buffer(
-                  remoteBuf,
-                  resolved.audioUrl || resolved.mp4Url,
-                  `youtube.com/watch?v=${videoId} (${resolved.instanceName})`,
-                  sessionId
-                );
-              }
-            } catch {
-              // Keep active stream
-            }
+        // 1. If ExternalModeCanvasPlayer passed a resolved MP4 stream override, stream it directly
+        if (externalStreamOverride?.mp4Url) {
+          const label = `youtube.com/watch?v=${videoId} (${externalStreamOverride.instanceName})`;
+          setSourceLabel(label);
+          setStatusText(
+            `Demuxando stream YouTube "${videoTitleRef.current.slice(
+              0,
+              36
+            )}" (${videoId}) via ${externalStreamOverride.instanceName}...`
+          );
+          const ok = await streamAndDemuxMp4Url(
+            externalStreamOverride.mp4Url,
+            externalStreamOverride.audioUrl || externalStreamOverride.mp4Url,
+            label,
+            sessionId
+          );
+          if (!ok && sessionId === loadSessionIdRef.current) {
+            setIsBufferingStream(false);
+            setStreamError(
+              `Não foi possível extrair quadros H.264 do stream (${videoId}).`
+            );
           }
+          return;
+        }
+
+        // 2. Check if videoId is one of the 8 pre-packaged catalog streams
+        const catalogEntry = getStreamForYouTubeVideoId(videoId);
+        if (catalogEntry) {
+          setSourceLabel(`youtube.com/watch?v=${videoId} (itag=18)`);
+          setStatusText(
+            `Conectando stream YouTube "${videoTitleRef.current.slice(
+              0,
+              38
+            )}" (${videoId})...`
+          );
+          await streamAndDemuxMp4Url(
+            catalogEntry.mp4Url,
+            catalogEntry.mp4Url,
+            `youtube.com/watch?v=${videoId} (itag=18)`,
+            sessionId
+          );
+          return;
+        }
+
+        // 3. User selected a video from their logged-in playlist, liked videos, subscriptions, or search:
+        // NEVER play a default catalog video! Resolve the exact YouTube videoId via CORS instances.
+        setSourceLabel(`youtube.com/watch?v=${videoId} (itag=18 CORS)`);
+        setStatusText(
+          `Resolvendo stream YouTube "${videoTitleRef.current.slice(
+            0,
+            36
+          )}" (${videoId}) via Piped / Invidious CORS...`
+        );
+
+        const resolved = await resolveCorsStreamsForVideo(videoId);
+        if (sessionId !== loadSessionIdRef.current) return;
+
+        if (!resolved.isFallback && resolved.mp4Url) {
+          setStatusText(
+            `Conectando MP4Box.js + WASM ao stream YouTube (${videoId}) via ${resolved.instanceName}...`
+          );
+          const ok = await streamAndDemuxMp4Url(
+            resolved.mp4Url,
+            resolved.audioUrl || resolved.mp4Url,
+            `youtube.com/watch?v=${videoId} (${resolved.instanceName})`,
+            sessionId
+          );
+          if (!ok && sessionId === loadSessionIdRef.current) {
+            setIsBufferingStream(false);
+            setStreamError(
+              `O stream retornado para "${videoTitleRef.current}" (${videoId}) não contém átomos MP4 H.264 compatíveis.`
+            );
+            setStatusText(
+              `Falha ao demuxar MP4 (${videoId}). Tente clicar em Reconectar ou usar o modo IFrame.`
+            );
+          }
+        } else {
+          setIsBufferingStream(false);
+          setStreamError(
+            `As instâncias públicas CORS (Piped / Invidious) bloquearam ou limitaram temporariamente a extração direta de "${videoTitleRef.current}" (${videoId}).`
+          );
+          setStatusText(
+            `Stream direto indisponível nas instâncias públicas para (${videoId}). Clique em Reconectar ou alterne o modo.`
+          );
         }
       } catch (err) {
         if (sessionId === loadSessionIdRef.current) {
+          setIsBufferingStream(false);
           const msg =
             err instanceof Error ? err.message : 'Erro ao demuxar stream MP4';
+          setStreamError(
+            `Erro ao carregar o vídeo "${videoTitleRef.current}" (${videoId}): ${msg}`
+          );
           setStatusText(`Erro no stream (${videoId}): ${msg}`);
         }
       }
-    }, [demuxAndStartMp4Buffer, fetchMp4BufferCapped, videoId]);
+    }, [
+      externalStreamOverride,
+      resetActivePlayback,
+      streamAndDemuxMp4Url,
+      videoId,
+    ]);
 
     useEffect(() => {
       startVideoSession();
@@ -740,13 +920,16 @@ export const LocalModeCanvasPlayer = forwardRef<
 
           while (
             currentSampleIdxRef.current < samples.length &&
-            samples[currentSampleIdxRef.current].ptsSec <= mediaSec + 0.012
+            samples[currentSampleIdxRef.current].ptsSec <= mediaSec + 0.015
           ) {
             decodeSampleAtIndex(currentSampleIdxRef.current);
             currentSampleIdxRef.current += 1;
           }
 
-          if (currentSampleIdxRef.current >= samples.length) {
+          if (
+            isStreamCompleteRef.current &&
+            currentSampleIdxRef.current >= samples.length
+          ) {
             if (autoContinuousPlayRef.current) {
               seekToSeconds(0);
               if (audioRef.current && audioRef.current.src) {
@@ -782,11 +965,15 @@ export const LocalModeCanvasPlayer = forwardRef<
           onMuteStateChangeRef.current(next);
         },
         resync: () => {
-          seekToSeconds(pausedMediaTimeRef.current);
-          onPlayStateChangeRef.current(true);
+          if (samplesRef.current.length > 0) {
+            seekToSeconds(pausedMediaTimeRef.current);
+            onPlayStateChangeRef.current(true);
+          } else {
+            startVideoSession();
+          }
         },
       }),
-      [seekToSeconds]
+      [seekToSeconds, startVideoSession]
     );
 
     const formatTime = (sec: number) => {
@@ -797,50 +984,56 @@ export const LocalModeCanvasPlayer = forwardRef<
     };
 
     return (
-      <div className="canvas-mode-stage" id="local-mode-canvas-stage">
+      <div
+        className="canvas-mode-stage"
+        id={hideHud ? undefined : 'local-mode-canvas-stage'}
+        style={hideHud ? { width: '100%', height: '100%' } : undefined}
+      >
         {/* Top Overlay Diagnostics for Serverless YouTube Stream -> MP4Box.js + TinyH264 WASM Worker */}
-        <div className="canvas-mode-stage__hud">
-          <div className="canvas-mode-stage__badges">
-            <span className="canvas-mode-badge canvas-mode-badge--local">
-              <Cpu size={12} />
-              <span>
-                LOCAL MODE • MP4Box.js + TinyH264 WASM Worker (WebGL)
+        {!hideHud && (
+          <div className="canvas-mode-stage__hud">
+            <div className="canvas-mode-stage__badges">
+              <span className="canvas-mode-badge canvas-mode-badge--local">
+                <Cpu size={12} />
+                <span>
+                  LOCAL MODE • MP4Box.js + TinyH264 WASM Worker (WebGL)
+                </span>
               </span>
-            </span>
-            <span className="canvas-mode-badge">
-              {dimensionsLabel} • {fpsEstimate}fps • {naluCounter} NALUs
-            </span>
-            <span className="canvas-mode-badge">
-              {formatTime(currentTimeSec)} / {formatTime(durationSec)}
-            </span>
-          </div>
+              <span className="canvas-mode-badge">
+                {dimensionsLabel} • {fpsEstimate}fps • {naluCounter} NALUs
+              </span>
+              <span className="canvas-mode-badge">
+                {formatTime(currentTimeSec)} / {formatTime(durationSec)}
+              </span>
+            </div>
 
-          <div className="canvas-mode-stage__actions">
-            <span
-              className="canvas-mode-badge"
-              title={`YouTube Stream Source: https://www.youtube.com/watch?v=${videoId}`}
-            >
-              <Radio size={11} />
-              <span>yt:{videoId}</span>
-            </span>
+            <div className="canvas-mode-stage__actions">
+              <span
+                className="canvas-mode-badge"
+                title={`YouTube Stream Source: https://www.youtube.com/watch?v=${videoId}`}
+              >
+                <Radio size={11} />
+                <span>yt:{videoId}</span>
+              </span>
 
-            <button
-              id="btn-local-reload-stream"
-              type="button"
-              className="canvas-hud-btn"
-              onClick={() => startVideoSession()}
-              title="Reconectar e demuxar stream YouTube (itag=18) no Web Worker WASM"
-            >
-              <RefreshCw size={12} />
-              <span>Reconectar</span>
-            </button>
+              <button
+                id="btn-local-reload-stream"
+                type="button"
+                className="canvas-hud-btn"
+                onClick={() => startVideoSession()}
+                title="Reconectar e demuxar stream YouTube (itag=18) no Web Worker WASM"
+              >
+                <RefreshCw size={12} />
+                <span>Reconectar</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Pure WebGL HTML5 <canvas> surface (NO <video> element in DOM) */}
         <canvas
           ref={canvasRef}
-          id="local-mode-h264-canvas"
+          id={hideHud ? 'external-mp4-h264-canvas' : 'local-mode-h264-canvas'}
           className="canvas-mode-stage__canvas"
           width={640}
           height={360}
@@ -853,14 +1046,67 @@ export const LocalModeCanvasPlayer = forwardRef<
           }}
         />
 
+        {/* Loading or Error status overlay for non-catalog YouTube streams so user never sees a wrong video */}
+        {(isBufferingStream || streamError) && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '10px',
+              padding: '24px',
+              textAlign: 'center',
+              background: 'rgba(8, 11, 16, 0.82)',
+              pointerEvents: streamError ? 'auto' : 'none',
+              zIndex: 4,
+            }}
+          >
+            <div
+              style={{
+                fontSize: '14px',
+                fontWeight: 600,
+                color: '#f4f6fb',
+                maxWidth: '520px',
+              }}
+            >
+              {videoTitle} ({videoId})
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                color: streamError ? '#ff8a8a' : '#9fb0c7',
+                maxWidth: '540px',
+                lineHeight: 1.45,
+              }}
+            >
+              {streamError || statusText}
+            </div>
+            {streamError && (
+              <button
+                type="button"
+                className="canvas-hud-btn canvas-hud-btn--active"
+                onClick={() => startVideoSession()}
+              >
+                <RefreshCw size={12} />
+                <span>Tentar Novamente ({videoId})</span>
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Pure HTML5 <audio> element for synchronized audio track in Drive mode */}
         <audio ref={audioRef} preload="auto" style={{ display: 'none' }} />
 
         {/* Bottom Status Telemetry Pill */}
-        <div className="canvas-mode-stage__footer">
-          <span className="canvas-mode-stage__source">{sourceLabel}</span>
-          <span className="canvas-mode-stage__status">{statusText}</span>
-        </div>
+        {!hideHud && (
+          <div className="canvas-mode-stage__footer">
+            <span className="canvas-mode-stage__source">{sourceLabel}</span>
+            <span className="canvas-mode-stage__status">{statusText}</span>
+          </div>
+        )}
       </div>
     );
   }

@@ -249,23 +249,46 @@ export function App() {
         fetchUserSubscriptions(accessToken),
       ]);
 
+      let loadedUserVideoList = false;
+
       if (
         userPlaylists.status === 'fulfilled' &&
         userPlaylists.value.length > 0
       ) {
-        const firstPl = userPlaylists.value[0];
-        try {
-          const firstItems = await fetchPlaylistItems(firstPl.id, accessToken);
-          firstPl.items = firstItems;
-        } catch {
-          // ignore
+        let activePl = userPlaylists.value[0];
+        for (const pl of userPlaylists.value.slice(0, 4)) {
+          try {
+            const items = await fetchPlaylistItems(pl.id, accessToken);
+            pl.items = items;
+            if (items.length > 0 && (!activePl.items || activePl.items.length === 0)) {
+              activePl = pl;
+            }
+          } catch {
+            // ignore individual playlist error
+          }
         }
         setPlaylists([...userPlaylists.value, ...DEFAULT_PLAYLISTS]);
-        setSelectedPlaylist(firstPl);
+        setSelectedPlaylist(activePl);
+        if (activePl.items && activePl.items.length > 0) {
+          setVideos(activePl.items);
+          setQueue(activePl.items);
+          setCurrentQueueIndex(0);
+          setCurrentVideo(activePl.items[0]);
+          setActivePlaylistTitle(activePl.title);
+          setActiveYoutubeTab('playlists');
+          loadedUserVideoList = true;
+        }
       }
 
       if (userLiked.status === 'fulfilled' && userLiked.value.length > 0) {
         setLikedVideos(userLiked.value);
+        if (!loadedUserVideoList) {
+          setVideos(userLiked.value);
+          setQueue(userLiked.value);
+          setCurrentQueueIndex(0);
+          setCurrentVideo(userLiked.value[0]);
+          setActivePlaylistTitle('Vídeos com Gostei');
+        }
       }
 
       if (userSubs.status === 'fulfilled' && userSubs.value.length > 0) {
@@ -283,6 +306,14 @@ export function App() {
     } finally {
       setIsLoadingApi(false);
     }
+  }, []);
+
+  // Automatically sync user playlists on initial mount if a valid OAuth token is present
+  useEffect(() => {
+    if (userProfile?.accessToken && userProfile.expiresAt > Date.now()) {
+      syncYoutubeAccountData(userProfile.accessToken);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Trigger Google Identity Services OAuth 2.0 Login
@@ -365,7 +396,7 @@ export function App() {
         );
         const hydrated: YouTubePlaylist = {
           ...playlist,
-          items: items.length > 0 ? items : DEFAULT_FEATURED_VIDEOS.slice(0, 4),
+          items,
           itemCount: items.length || playlist.itemCount,
         };
         setPlaylists((prev) =>

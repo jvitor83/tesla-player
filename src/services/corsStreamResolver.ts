@@ -9,28 +9,34 @@ export interface PublicStreamInstance {
 
 export const PUBLIC_CORS_INSTANCES: PublicStreamInstance[] = [
   {
+    id: 'piped-privatecoffee',
+    name: 'Piped (api.piped.private.coffee)',
+    type: 'piped',
+    baseUrl: 'https://api.piped.private.coffee',
+  },
+  {
+    id: 'piped-ducksparty',
+    name: 'Piped (pipedapi.ducks.party)',
+    type: 'piped',
+    baseUrl: 'https://pipedapi.ducks.party',
+  },
+  {
     id: 'invidious-nadeko',
     name: 'Invidious (inv.nadeko.net)',
     type: 'invidious',
     baseUrl: 'https://inv.nadeko.net',
   },
   {
-    id: 'piped-privatecoffee',
-    name: 'Piped (private.coffee)',
-    type: 'piped',
-    baseUrl: 'https://api.piped.private.coffee',
+    id: 'invidious-f5si',
+    name: 'Invidious (invidious.f5.si)',
+    type: 'invidious',
+    baseUrl: 'https://invidious.f5.si',
   },
   {
     id: 'invidious-nerdvpn',
-    name: 'Invidious (nerdvpn.de)',
+    name: 'Invidious (invidious.nerdvpn.de)',
     type: 'invidious',
     baseUrl: 'https://invidious.nerdvpn.de',
-  },
-  {
-    id: 'piped-kavin',
-    name: 'Piped (kavin.rocks)',
-    type: 'piped',
-    baseUrl: 'https://pipedapi.kavin.rocks',
   },
   {
     id: 'invidious-yewtu',
@@ -99,21 +105,16 @@ export const YOUTUBE_VIDEO_STREAM_MAP: Record<string, CatalogStreamEntry> = {
   },
 };
 
-const CATALOG_KEYS = Object.keys(YOUTUBE_VIDEO_STREAM_MAP);
-
-export function getStreamForYouTubeVideoId(videoId: string): CatalogStreamEntry {
+/**
+ * Returns the pre-packaged stream entry ONLY if videoId is one of the 8 catalog IDs.
+ * Returns null for any other YouTube video ID (e.g. user playlists, liked videos, search results)
+ * so we NEVER play a default video in place of a user-selected video.
+ */
+export function getStreamForYouTubeVideoId(
+  videoId: string
+): CatalogStreamEntry | null {
   const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
-  const direct = YOUTUBE_VIDEO_STREAM_MAP[normalizedId];
-  if (direct) {
-    return direct;
-  }
-
-  let hash = 0;
-  for (let i = 0; i < normalizedId.length; i++) {
-    hash = (hash * 31 + normalizedId.charCodeAt(i)) | 0;
-  }
-  const key = CATALOG_KEYS[Math.abs(hash) % CATALOG_KEYS.length];
-  return YOUTUBE_VIDEO_STREAM_MAP[key];
+  return YOUTUBE_VIDEO_STREAM_MAP[normalizedId] || null;
 }
 
 export interface ResolvedCorsStream {
@@ -177,7 +178,7 @@ function withLocalCorsParam(rawUrl: string, instanceBaseUrl: string): string {
 
 async function fetchWithTimeout(
   url: string,
-  timeoutMs = 2400,
+  timeoutMs = 8000,
   init?: RequestInit
 ): Promise<Response> {
   const controller = new AbortController();
@@ -200,14 +201,13 @@ async function querySingleInstance(
 ): Promise<ResolvedCorsStream> {
   const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
   const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
-  const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
 
   if (instance.type === 'piped') {
     const endpoint = `${instance.baseUrl}/streams/${encodeURIComponent(
       normalizedId
     )}`;
     logs.push(`GET ${endpoint} (source: ${youtubeUrl})`);
-    const res = await fetchWithTimeout(endpoint, 2400, {
+    const res = await fetchWithTimeout(endpoint, 8000, {
       headers: { Accept: 'application/json' },
     });
     if (!res.ok) {
@@ -220,14 +220,16 @@ async function querySingleInstance(
       throw new Error(data.error);
     }
 
-    const vStreams = (data.videoStreams || []).filter(
+    const allVStreams = (data.videoStreams || []).filter((s) => Boolean(s.url));
+    const nonLbryStreams = allVStreams.filter(
       (s) =>
-        s.url &&
         !s.quality?.toUpperCase().includes('LBRY') &&
-        !s.url.includes('odycdn.com')
+        !s.url?.includes('odycdn.com')
     );
+    const vStreams = nonLbryStreams.length > 0 ? nonLbryStreams : allVStreams;
     const aStreams = data.audioStreams || [];
 
+    // Only pick muxed (non-videoOnly) WebM for OGV.js, or adaptive WebM if audio is available
     const webmStream =
       vStreams.find(
         (s) =>
@@ -268,7 +270,7 @@ async function querySingleInstance(
 
     const candidateUrl = mp4Stream?.url || webmStream?.url;
     if (candidateUrl) {
-      const probe = await fetchWithTimeout(candidateUrl, 1800, {
+      const probe = await fetchWithTimeout(candidateUrl, 6000, {
         headers: { Range: 'bytes=0-32767' },
       });
       if (!probe.ok && probe.status !== 206) {
@@ -277,15 +279,23 @@ async function querySingleInstance(
       }
     }
 
-    logs.push(`${instance.name}: Stream YouTube (${normalizedId}) ativo via CORS.`);
+    const resolvedAudioUrl =
+      mp4Stream && !mp4Stream.videoOnly
+        ? mp4Stream.url
+        : bestAudio?.url || mp4Stream?.url || webmStream?.url;
+
+    logs.push(
+      `${instance.name}: Stream YouTube (${normalizedId}) ativo via CORS.`
+    );
     return {
       videoId: normalizedId,
       youtubeUrl,
-      title: data.title || catalogEntry.title,
-      webmUrl: webmStream?.url || catalogEntry.webmUrl,
-      mp4Url: mp4Stream?.url || catalogEntry.mp4Url,
-      audioUrl: bestAudio?.url || mp4Stream?.url || catalogEntry.mp4Url,
-      codecLabel: webmStream?.codec || mp4Stream?.codec || 'itag=18 H.264 / VP8',
+      title: data.title,
+      webmUrl: webmStream && !webmStream.videoOnly ? webmStream.url || '' : '',
+      mp4Url: mp4Stream?.url || '',
+      audioUrl: resolvedAudioUrl,
+      codecLabel:
+        mp4Stream?.codec || webmStream?.codec || 'itag=18 H.264 / AAC (MP4)',
       instanceName: `${instance.name} • YouTube (${normalizedId})`,
       isFallback: false,
       logs,
@@ -299,66 +309,88 @@ async function querySingleInstance(
     )}?local=true`;
     logs.push(`GET ${latestVersionItag18}`);
 
-    const res = await fetchWithTimeout(endpoint, 2400, {
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) {
-      logs.push(`${instance.name}: HTTP ${res.status}`);
-      throw new Error(`HTTP ${res.status}`);
+    let resolvedTitle: string | undefined;
+    let resolvedMp4 = latestVersionItag18;
+    let resolvedWebm = '';
+    let resolvedAudio = latestVersionItag18;
+    let resolvedCodec = 'itag=18 H.264 / AAC (local=true)';
+
+    try {
+      const res = await fetchWithTimeout(endpoint, 6000, {
+        headers: { Accept: 'application/json' },
+      });
+      if (res.ok) {
+        const data = (await res.json()) as InvidiousResponse;
+        if (!data.error) {
+          resolvedTitle = data.title;
+          const formatStreams = data.formatStreams || [];
+          const adaptiveFormats = data.adaptiveFormats || [];
+
+          const muxedMp4 = formatStreams.find(
+            (f) =>
+              f.url &&
+              (String(f.itag) === '18' ||
+                f.container === 'mp4' ||
+                f.type?.includes('video/mp4'))
+          );
+
+          const webmCandidate = formatStreams.find(
+            (f) =>
+              f.url &&
+              (f.container === 'webm' || f.type?.includes('video/webm'))
+          );
+
+          const audioCandidate = adaptiveFormats.find(
+            (f) =>
+              f.url &&
+              (f.type?.includes('audio/mp4') ||
+                f.type?.includes('audio/webm') ||
+                f.type?.includes('audio/'))
+          );
+
+          if (muxedMp4?.url) {
+            resolvedMp4 = withLocalCorsParam(muxedMp4.url, instance.baseUrl);
+          }
+          if (webmCandidate?.url) {
+            resolvedWebm = withLocalCorsParam(
+              webmCandidate.url,
+              instance.baseUrl
+            );
+          }
+          if (muxedMp4?.url) {
+            resolvedAudio = resolvedMp4;
+          } else if (audioCandidate?.url) {
+            resolvedAudio = withLocalCorsParam(
+              audioCandidate.url,
+              instance.baseUrl
+            );
+          }
+          if (muxedMp4?.encoding || webmCandidate?.encoding) {
+            resolvedCodec =
+              muxedMp4?.encoding ||
+              webmCandidate?.encoding ||
+              resolvedCodec;
+          }
+        }
+      }
+    } catch {
+      // Proceed to probe /latest_version?id=VIDEO_ID&itag=18&local=true directly
     }
-    const data = (await res.json()) as InvidiousResponse;
-    if (data.error) {
-      logs.push(`${instance.name}: ${data.error}`);
-      throw new Error(data.error);
-    }
 
-    const formatStreams = data.formatStreams || [];
-    const adaptiveFormats = data.adaptiveFormats || [];
-
-    const muxedMp4 = formatStreams.find(
-      (f) =>
-        f.url &&
-        (String(f.itag) === '18' ||
-          f.container === 'mp4' ||
-          f.type?.includes('video/mp4'))
-    );
-
-    const webmCandidate =
-      formatStreams.find(
-        (f) =>
-          f.url && (f.container === 'webm' || f.type?.includes('video/webm'))
-      ) ||
-      adaptiveFormats.find(
-        (f) =>
-          f.url &&
-          (f.container === 'webm' ||
-            f.type?.includes('video/webm; codecs="vp8') ||
-            f.type?.includes('video/webm; codecs="vp9'))
-      );
-
-    const audioCandidate = adaptiveFormats.find(
-      (f) =>
-        f.url &&
-        (f.type?.includes('audio/mp4') ||
-          f.type?.includes('audio/webm') ||
-          f.type?.includes('audio/'))
-    );
-
-    const resolvedMp4 = muxedMp4?.url
-      ? withLocalCorsParam(muxedMp4.url, instance.baseUrl)
-      : latestVersionItag18;
-    const resolvedWebm = webmCandidate?.url
-      ? withLocalCorsParam(webmCandidate.url, instance.baseUrl)
-      : catalogEntry.webmUrl;
-    const resolvedAudio = audioCandidate?.url
-      ? withLocalCorsParam(audioCandidate.url, instance.baseUrl)
-      : resolvedMp4;
-
-    const probe = await fetchWithTimeout(resolvedMp4, 1800, {
+    const probe = await fetchWithTimeout(resolvedMp4, 6000, {
       headers: { Range: 'bytes=0-32767' },
     });
-    if (!probe.ok && probe.status !== 206) {
-      logs.push(`${instance.name} /latest_version: HTTP ${probe.status}`);
+    const contentType = (probe.headers.get('content-type') || '').toLowerCase();
+    if (
+      (!probe.ok && probe.status !== 206) ||
+      contentType.includes('text/html') ||
+      contentType.includes('application/json')
+    ) {
+      logs.push(
+        `${instance.name} /latest_version: HTTP ${probe.status} (${
+          contentType || 'no-video'
+        })`
+      );
       throw new Error(`Stream HTTP ${probe.status}`);
     }
 
@@ -368,14 +400,11 @@ async function querySingleInstance(
     return {
       videoId: normalizedId,
       youtubeUrl,
-      title: data.title || catalogEntry.title,
+      title: resolvedTitle,
       webmUrl: resolvedWebm,
       mp4Url: resolvedMp4,
       audioUrl: resolvedAudio,
-      codecLabel:
-        webmCandidate?.encoding ||
-        muxedMp4?.encoding ||
-        'itag=18 H.264 / VP8 (local=true)',
+      codecLabel: resolvedCodec,
       instanceName: `${instance.name} • YouTube (${normalizedId})`,
       isFallback: false,
       logs,
@@ -391,9 +420,7 @@ export async function resolveCorsStreamsForVideo(
   const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
   const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
   const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
-  const logs: string[] = [
-    `Source YouTube URL: ${youtubeUrl}`,
-  ];
+  const logs: string[] = [`Source YouTube URL: ${youtubeUrl}`];
   const instancesToTry: PublicStreamInstance[] = [];
 
   if (customInstanceUrl && customInstanceUrl.trim()) {
@@ -430,19 +457,36 @@ export async function resolveCorsStreamsForVideo(
     );
     return winner;
   } catch {
-    logs.push(
-      `Stream YouTube (${normalizedId}) servido via proxy CORS embarcado (itag=18 H.264 + VP8 WebM).`
-    );
+    if (catalogEntry) {
+      logs.push(
+        `Stream YouTube (${normalizedId}) servido via proxy CORS embarcado (itag=18 H.264 + VP8 WebM).`
+      );
+      return {
+        videoId: normalizedId,
+        youtubeUrl,
+        title: catalogEntry.title,
+        webmUrl: catalogEntry.webmUrl,
+        mp4Url: catalogEntry.mp4Url,
+        audioUrl: catalogEntry.mp4Url,
+        codecLabel: 'YouTube itag=18 (H.264 / VP8 WASM)',
+        instanceName: `YouTube Stream (${normalizedId})`,
+        isFallback: false,
+        logs,
+      };
+    }
 
+    logs.push(
+      `Todas as instâncias públicas CORS falharam ou retornaram bloqueio para o vídeo (${normalizedId}).`
+    );
     return {
       videoId: normalizedId,
       youtubeUrl,
-      title: catalogEntry.title,
-      webmUrl: catalogEntry.webmUrl,
-      mp4Url: catalogEntry.mp4Url,
-      audioUrl: catalogEntry.mp4Url,
-      codecLabel: 'YouTube itag=18 (H.264 / VP8 WASM)',
-      instanceName: `YouTube Stream (${normalizedId})`,
+      title: undefined,
+      webmUrl: '',
+      mp4Url: '',
+      audioUrl: '',
+      codecLabel: 'Indisponível nas instâncias públicas',
+      instanceName: `Sem stream CORS disponível (${normalizedId})`,
       isFallback: true,
       logs,
     };
