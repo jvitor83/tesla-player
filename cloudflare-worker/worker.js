@@ -84,10 +84,18 @@ export default {
           },
         });
       } catch (err) {
+        const isBotCheck = err.code === 'YOUTUBE_BOT_CHECK';
         return new Response(
-          JSON.stringify({ error: 'Failed to resolve video info', details: err.message }),
+          JSON.stringify({
+            error: 'Failed to resolve video info',
+            code: err.code || 'RESOLVE_FAILED',
+            details: err.message,
+            hint: isBotCheck
+              ? 'YouTube is gating requests from this Worker\'s datacenter IP behind a "Sign in to confirm you\'re not a bot" check. This cannot be resolved server-side; use the official IFrame mode or self-hosted media instead.'
+              : undefined,
+          }),
           {
-            status: 502,
+            status: isBotCheck ? 403 : 502,
             headers: {
               'Content-Type': 'application/json',
               'Access-Control-Allow-Origin': '*',
@@ -202,7 +210,9 @@ async function resolveStreamForVideo(videoId, origin) {
   const playerData = await playerRes.json();
   const playability = playerData.playabilityStatus || {};
   if (playability.status !== 'OK') {
-    throw new Error(`YouTube playability status: ${playability.status} (${playability.reason || 'unplayable'})`);
+    const error = new Error(`YouTube playability status: ${playability.status} (${playability.reason || 'unplayable'})`);
+    error.code = playability.status === 'LOGIN_REQUIRED' ? 'YOUTUBE_BOT_CHECK' : `YOUTUBE_${playability.status || 'UNPLAYABLE'}`;
+    throw error;
   }
 
   const streamingData = playerData.streamingData || {};

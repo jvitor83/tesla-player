@@ -60,3 +60,26 @@ npx wrangler deploy
 - `GET /info?id=VIDEO_ID`: Retorna os metadados do vídeo e as URLs diretas de stream com CORS.
 - `GET /stream?id=VIDEO_ID&itag=18`: Transmite o arquivo de mídia MP4 com suporte a cabeçalhos `Range: bytes=...` e `Access-Control-Allow-Origin: *`.
 - `GET /proxy?url=URL_CODIFICADA`: Proxy de streaming de mídia direto com injeção de cabeçalhos CORS.
+
+---
+
+## ⚠️ Limitação conhecida: `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot")
+
+O YouTube marca os IPs de datacenter (incluindo os da rede do Cloudflare Workers) e passa a exigir
+login / verificação anti-bot (BotGuard / PO token) para o endpoint `/youtubei/v1/player`. Quando isso
+acontece, o Worker responde **HTTP 403** com:
+
+```json
+{ "error": "Failed to resolve video info", "code": "YOUTUBE_BOT_CHECK", "details": "YouTube playability status: LOGIN_REQUIRED (...)" }
+```
+
+Isso **não é corrigível do lado do servidor** de forma legítima: as URLs `googlevideo.com` ficam
+amarradas ao IP que as resolveu, e contornar a verificação anti-bot (rotação de clientes, cookies
+falsos, geração de PO token, proxies residenciais) não é suportado por este projeto.
+
+O app trata o erro e mostra a mensagem ao usuário, sem ficar repetindo requisições. Alternativas:
+
+- **Modo IFrame** (player oficial do YouTube) para vídeos do YouTube.
+- **Mídia própria** (ex.: Cloudflare R2 / Cloudflare Stream com MP4 H.264) tocada pelo pipeline
+  Backendless (mp4box.js → tinyh264 WASM → WebGL `<canvas>` + `<audio>`), que funciona sem `<video>`.
+- Os vídeos do **catálogo** pré-empacotado continuam funcionando no modo Backendless.

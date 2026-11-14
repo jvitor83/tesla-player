@@ -15,6 +15,7 @@ import {
 import {
   PUBLIC_CORS_INSTANCES,
   resolveCorsStreamsForVideo,
+  describeStreamResolutionError,
   getStreamForYouTubeVideoId,
 } from '../services/corsStreamResolver';
 
@@ -391,11 +392,15 @@ export const ExternalModeCanvasPlayer = forwardRef<
 
         // If all external instances failed and this is NOT one of the 8 catalog videos, NEVER play a default video!
         if (!catalogEntry) {
+          const specific = describeStreamResolutionError(resolved);
           setExternalError(
-            `As instâncias públicas Invidious / Piped bloquearam ou limitaram temporariamente a extração CORS para "${videoTitleRef.current}" (${videoId}).`
+            specific ||
+              `As instâncias públicas Invidious / Piped bloquearam ou limitaram temporariamente a extração CORS para "${videoTitleRef.current}" (${videoId}).`
           );
           setStatusText(
-            `Stream CORS indisponível para (${videoId}). Tente outra instância no seletor acima ou clique em Reconectar.`
+            specific
+              ? `Stream indisponível para (${videoId}). Alterne para o modo IFrame.`
+              : `Stream CORS indisponível para (${videoId}). Tente outra instância no seletor acima ou clique em Reconectar.`
           );
         }
       },

@@ -150,6 +150,29 @@ export interface ResolvedCorsStream {
   instanceName: string;
   isFallback: boolean;
   logs: string[];
+  /** Machine-readable failure code (e.g. YOUTUBE_BOT_CHECK) when resolution failed. */
+  errorCode?: string;
+  /** Human-readable failure message when resolution failed. */
+  errorMessage?: string;
+}
+
+/**
+ * Returns a user-facing (PT-BR) explanation when stream resolution failed with a known
+ * error code, or null when there is no specific explanation.
+ */
+export function describeStreamResolutionError(
+  resolved: Pick<ResolvedCorsStream, 'errorCode' | 'errorMessage'>
+): string | null {
+  switch (resolved.errorCode) {
+    case 'YOUTUBE_BOT_CHECK':
+      return 'O YouTube bloqueou o IP do Cloudflare Worker com a verificação anti-bot ("Sign in to confirm you\'re not a bot"). Isso não é corrigível pelo servidor — use o modo IFrame (oficial) para este vídeo.';
+    case 'WORKER_UNREACHABLE':
+      return `Não foi possível contatar o Cloudflare Worker (${resolved.errorMessage || 'timeout'}). Verifique a URL configurada.`;
+    case undefined:
+      return null;
+    default:
+      return `O Cloudflare Worker não conseguiu resolver o vídeo: ${resolved.errorMessage || resolved.errorCode}.`;
+  }
 }
 
 interface PipedStreamItem {
@@ -455,6 +478,8 @@ export async function resolveCorsStreamsForVideo(
     const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
     const logs: string[] = [`Source YouTube URL: ${youtubeUrl}`];
     const cfWorkerUrl = getSavedCloudflareWorkerUrl();
+    let cfErrorCode: string | undefined;
+    let cfErrorMessage: string | undefined;
 
     // 1. If user configured a Cloudflare Worker Gateway, prioritize it!
     if (cfWorkerUrl) {
@@ -491,9 +516,24 @@ export async function resolveCorsStreamsForVideo(
             });
             return cfResult;
           }
+        } else {
+          let code = `HTTP_${cfRes.status}`;
+          let details = `Cloudflare Worker respondeu HTTP ${cfRes.status}`;
+          try {
+            const errData = (await cfRes.json()) as { code?: string; details?: string; error?: string };
+            code = errData.code || code;
+            details = errData.details || errData.error || details;
+          } catch {
+            // non-JSON error body
+          }
+          cfErrorCode = code;
+          cfErrorMessage = details;
+          logs.push(`Cloudflare Worker retornou erro (${code}): ${details}`);
         }
       } catch (cfErr) {
-        logs.push(`Cloudflare Worker falhou: ${cfErr instanceof Error ? cfErr.message : String(cfErr)}`);
+        cfErrorCode = 'WORKER_UNREACHABLE';
+        cfErrorMessage = cfErr instanceof Error ? cfErr.message : String(cfErr);
+        logs.push(`Cloudflare Worker falhou: ${cfErrorMessage}`);
       }
     }
 
@@ -525,8 +565,9 @@ export async function resolveCorsStreamsForVideo(
       }
     }
 
-    // Try instances sequentially (max 3) to avoid flooding the browser network queue
-    for (const inst of instancesToTry.slice(0, 3)) {
+    // Try instances sequentially (max 3) to avoid flooding the browser network queue.
+    // Skip them entirely when a Cloudflare Worker is configured (it already reported the outcome).
+    for (const inst of cfWorkerUrl ? [] : instancesToTry.slice(0, 3)) {
       try {
         const winner = await querySingleInstance(inst, normalizedId, logs);
         recentResolutionCache.set(cacheKey, {
@@ -563,7 +604,9 @@ export async function resolveCorsStreamsForVideo(
     }
 
     logs.push(
-      `Todas as instâncias públicas CORS falharam ou retornaram bloqueio para o vídeo (${normalizedId}).`
+      cfErrorCode
+        ? `Cloudflare Worker não conseguiu resolver o vídeo (${normalizedId}): ${cfErrorMessage}`
+        : `Todas as instâncias públicas CORS falharam ou retornaram bloqueio para o vídeo (${normalizedId}).`
     );
     const failedResult: ResolvedCorsStream = {
       videoId: normalizedId,
@@ -572,13 +615,16 @@ export async function resolveCorsStreamsForVideo(
       webmUrl: '',
       mp4Url: '',
       audioUrl: '',
-      codecLabel: 'Indisponível nas instâncias públicas',
+      codecLabel: cfErrorCode ? 'Bloqueado no Cloudflare Worker' : 'Indisponível nas instâncias públicas',
       instanceName: `Sem stream CORS disponível (${normalizedId})`,
       isFallback: true,
       logs,
+      errorCode: cfErrorCode,
+      errorMessage: cfErrorMessage,
     };
     recentResolutionCache.set(cacheKey, {
-      expiresAt: Date.now() + 10000,
+      // Bot-check blocks won't clear in seconds; avoid re-hitting the worker on every re-render.
+      expiresAt: Date.now() + (cfErrorCode === 'YOUTUBE_BOT_CHECK' ? 120000 : 10000),
       result: failedResult,
     });
     return failedResult;

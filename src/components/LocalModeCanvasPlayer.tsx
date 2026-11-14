@@ -10,6 +10,7 @@ import { createFile, MP4BoxBuffer, DataStream, Endianness } from 'mp4box';
 import { Cpu, RefreshCw, Radio } from 'lucide-react';
 import {
   resolveCorsStreamsForVideo,
+  describeStreamResolutionError,
   getStreamForYouTubeVideoId,
   getSavedCloudflareWorkerUrl,
 } from '../services/corsStreamResolver';
@@ -849,11 +850,15 @@ export const LocalModeCanvasPlayer = forwardRef<
           }
         } else {
           setIsBufferingStream(false);
+          const specific = describeStreamResolutionError(resolved);
           setStreamError(
-            `As instâncias públicas CORS (Piped / Invidious) bloquearam ou limitaram temporariamente a extração direta de "${videoTitleRef.current}" (${videoId}).`
+            specific ||
+              `As instâncias públicas CORS (Piped / Invidious) bloquearam ou limitaram temporariamente a extração direta de "${videoTitleRef.current}" (${videoId}).`
           );
           setStatusText(
-            `Stream direto indisponível nas instâncias públicas para (${videoId}). Clique em Reconectar ou alterne o modo.`
+            specific
+              ? `Stream indisponível para (${videoId}). Alterne para o modo IFrame.`
+              : `Stream direto indisponível nas instâncias públicas para (${videoId}). Clique em Reconectar ou alterne o modo.`
           );
         }
       } catch (err) {
