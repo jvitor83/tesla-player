@@ -310,24 +310,29 @@ export const ExternalModeCanvasPlayer = forwardRef<
           return;
         }
 
-        // If videoId is one of the 8 pre-packaged catalog streams, start its WebM stream while checking CORS
-        if (catalogEntry) {
+        // If videoId is one of the 8 pre-packaged catalog streams and no custom instance override was requested, play directly via WASM Worker
+        if (catalogEntry && !overrideInstanceId && !customUrl) {
+          setResolverLogs([
+            `Source YouTube URL: https://www.youtube.com/watch?v=${videoId}`,
+            `Stream YouTube (${videoId}) ativo via WASM Worker (${catalogEntry.webmUrl}).`,
+          ]);
           await mountOgvStream(
             catalogEntry.webmUrl,
             undefined,
-            `youtube.com/watch?v=${videoId} (CORS Proxy)`,
+            `youtube.com/watch?v=${videoId} (WASM Worker)`,
             'VP8 + Vorbis WASM Worker',
             sessionId
           );
-        } else {
-          setActiveInstanceName(`youtube.com/watch?v=${videoId}`);
-          setStatusText(
-            `Consultando Invidious (?local=true) / Piped CORS para "${videoTitleRef.current.slice(
-              0,
-              34
-            )}" (${videoId})...`
-          );
+          return;
         }
+
+        setActiveInstanceName(`youtube.com/watch?v=${videoId}`);
+        setStatusText(
+          `Consultando Invidious (?local=true) / Piped CORS para "${videoTitleRef.current.slice(
+            0,
+            34
+          )}" (${videoId})...`
+        );
 
         // Query public Invidious (?local=true) / Piped CORS APIs for this exact videoId
         const resolved = await resolveCorsStreamsForVideo(

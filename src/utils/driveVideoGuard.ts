@@ -9,7 +9,9 @@
 let guardInstalled = false;
 let audioCtx: AudioContext | null = null;
 
-export function installDriveVideoGuard(onExternalPauseIntercepted?: () => void): void {
+export function installDriveVideoGuard(
+  onExternalPauseIntercepted?: () => void
+): void {
   if (guardInstalled || typeof window === 'undefined') {
     return;
   }
@@ -38,13 +40,12 @@ export function installDriveVideoGuard(onExternalPauseIntercepted?: () => void):
     // Ignore if browser disallows property redefinition
   }
 
-  // 2. Intercept and suppress lifecycle events that trigger video frame suspension in Drive
+  // 2. Intercept and suppress page visibility lifecycle events in Drive
   const blockedLifecycleEvents = [
     'visibilitychange',
     'webkitvisibilitychange',
     'freeze',
     'pagehide',
-    'blur',
   ];
 
   const stopLifecycleEvent = (e: Event) => {
@@ -58,42 +59,6 @@ export function installDriveVideoGuard(onExternalPauseIntercepted?: () => void):
   for (const evtName of blockedLifecycleEvents) {
     document.addEventListener(evtName, stopLifecycleEvent, true);
     window.addEventListener(evtName, stopLifecycleEvent, true);
-  }
-
-  // 3. Guard HTMLMediaElement.prototype.pause against OS-injected pause calls
-  try {
-    const originalPause = HTMLMediaElement.prototype.pause;
-    HTMLMediaElement.prototype.pause = function (...args: unknown[]) {
-      const allowPause = (window as unknown as { __teslaAllowMediaPause?: boolean })
-        .__teslaAllowMediaPause;
-      if (allowPause) {
-        return originalPause.apply(this, args as []);
-      }
-      if (onExternalPauseIntercepted) {
-        onExternalPauseIntercepted();
-      }
-      return undefined;
-    };
-  } catch {
-    // Ignore if read-only
-  }
-
-  // 4. Intercept MediaSession OS-level pause/stop commands sent when shifting to Drive
-  if ('mediaSession' in navigator) {
-    try {
-      navigator.mediaSession.setActionHandler('pause', () => {
-        if (onExternalPauseIntercepted) {
-          onExternalPauseIntercepted();
-        }
-      });
-      navigator.mediaSession.setActionHandler('stop', () => {
-        if (onExternalPauseIntercepted) {
-          onExternalPauseIntercepted();
-        }
-      });
-    } catch {
-      // Ignore unsupported handlers
-    }
   }
 }
 

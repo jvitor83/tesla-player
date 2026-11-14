@@ -176,8 +176,10 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   const forceVideoDecoderResync = useCallback(
     (microNudgeOnly = false) => {
       if (playbackModeRef.current !== 'iframe') {
-        canvasPlayerRef.current?.resync();
-        setIsPlaying(true);
+        if (!microNudgeOnly) {
+          canvasPlayerRef.current?.resync();
+          setIsPlaying(true);
+        }
         return;
       }
 
@@ -210,7 +212,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
   // Install OS/Browser Drive Video Guard & Network Handover Listener
   useEffect(() => {
     installDriveVideoGuard(() => {
-      if (!userPausedRef.current) {
+      if (!userPausedRef.current && playbackModeRef.current === 'iframe') {
         forceVideoDecoderResync(true);
       }
     });
@@ -223,7 +225,7 @@ export const YouTubePlayerDeck: React.FC<YouTubePlayerDeckProps> = ({
     });
 
     const handleNetworkOnline = () => {
-      if (!userPausedRef.current) {
+      if (!userPausedRef.current && playbackModeRef.current === 'iframe') {
         forceVideoDecoderResync(false);
       }
     };
