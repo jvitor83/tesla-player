@@ -1,4 +1,4 @@
-import React, {
+import {
   useEffect,
   useRef,
   useState,
@@ -7,14 +7,12 @@ import React, {
   forwardRef,
 } from 'react';
 import { createFile, MP4BoxBuffer, DataStream, Endianness } from 'mp4box';
-import TinyH264 from 'tinyh264/es/TinyH264';
-import TinyH264Decoder from 'tinyh264/es/TinyH264Decoder';
-import type { TinyH264WasmModule } from 'tinyh264/es/TinyH264';
-import { Upload, Link2, Cpu, RefreshCw } from 'lucide-react';
+import { Cpu, RefreshCw, Radio } from 'lucide-react';
 import {
   resolveCorsStreamsForVideo,
-  getFallbackMp4ForVideoId,
+  getStreamForYouTubeVideoId,
 } from '../services/corsStreamResolver';
+import { WebGLYuvRenderer } from '../utils/webglYuvRenderer';
 
 export interface CanvasPlayerHandle {
   togglePlay: () => void;
@@ -42,6 +40,14 @@ interface ExtractedVideoSample {
   nalus: Uint8Array[];
 }
 
+interface WorkerPictureReadyMessage {
+  type: 'pictureReady' | 'decoderReady';
+  width?: number;
+  height?: number;
+  renderStateId?: number;
+  data?: ArrayBuffer;
+}
+
 function prependAnnexBStartCode(nalu: Uint8Array): Uint8Array {
   const out = new Uint8Array(4 + nalu.byteLength);
   out[0] = 0;
@@ -50,67 +56,6 @@ function prependAnnexBStartCode(nalu: Uint8Array): Uint8Array {
   out[3] = 1;
   out.set(nalu, 4);
   return out;
-}
-
-function renderYuv420ToCanvas(
-  canvas: HTMLCanvasElement,
-  yuv: Uint8Array,
-  strideWidth: number,
-  strideHeight: number,
-  displayWidth: number,
-  displayHeight: number,
-  imageDataCacheRef: React.MutableRefObject<ImageData | null>
-) {
-  const w = Math.min(strideWidth, displayWidth || strideWidth);
-  const h = Math.min(strideHeight, displayHeight || strideHeight);
-  if (w <= 0 || h <= 0) return;
-
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-    imageDataCacheRef.current = null;
-  }
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-
-  let imgData = imageDataCacheRef.current;
-  if (!imgData || imgData.width !== w || imgData.height !== h) {
-    imgData = ctx.createImageData(w, h);
-    imageDataCacheRef.current = imgData;
-  }
-
-  const rgba = imgData.data;
-  const lumaSize = strideWidth * strideHeight;
-  const chromaStride = strideWidth >> 1;
-  const uOffset = lumaSize;
-  const vOffset = lumaSize + (lumaSize >> 2);
-
-  for (let y = 0; y < h; y++) {
-    const yRowOffset = y * strideWidth;
-    const uvRowOffset = (y >> 1) * chromaStride;
-    const outRowOffset = y * w * 4;
-
-    for (let x = 0; x < w; x++) {
-      const yVal = yuv[yRowOffset + x] - 16;
-      const uvIdx = uvRowOffset + (x >> 1);
-      const uVal = yuv[uOffset + uvIdx] - 128;
-      const vVal = yuv[vOffset + uvIdx] - 128;
-
-      const c = yVal < 0 ? 0 : yVal * 298;
-      const r = (c + 409 * vVal + 128) >> 8;
-      const g = (c - 100 * uVal - 208 * vVal + 128) >> 8;
-      const b = (c + 516 * uVal + 128) >> 8;
-
-      const outIdx = outRowOffset + (x << 2);
-      rgba[outIdx] = r < 0 ? 0 : r > 255 ? 255 : r;
-      rgba[outIdx + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
-      rgba[outIdx + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
-      rgba[outIdx + 3] = 255;
-    }
-  }
-
-  ctx.putImageData(imgData, 0, 0);
 }
 
 export const LocalModeCanvasPlayer = forwardRef<
@@ -132,11 +77,11 @@ export const LocalModeCanvasPlayer = forwardRef<
   ) => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
-    const fileInputRef = useRef<HTMLInputElement | null>(null);
-    const imageDataCacheRef = useRef<ImageData | null>(null);
+    const webglRendererRef = useRef<WebGLYuvRenderer | null>(null);
 
-    const wasmModuleRef = useRef<TinyH264WasmModule | null>(null);
-    const decoderRef = useRef<TinyH264Decoder | null>(null);
+    const workerRef = useRef<Worker | null>(null);
+    const workerReadyRef = useRef<boolean>(false);
+    const renderStateIdRef = useRef<number>(1);
     const webCodecsDecoderRef = useRef<VideoDecoder | null>(null);
     const usingWebCodecsRef = useRef<boolean>(false);
 
@@ -148,24 +93,22 @@ export const LocalModeCanvasPlayer = forwardRef<
       width: 640,
       height: 360,
     });
-    const blobUrlRef = useRef<string | null>(null);
     const clockStartRef = useRef<number>(0);
     const pausedMediaTimeRef = useRef<number>(0);
     const decodedCountRef = useRef<number>(0);
     const loadSessionIdRef = useRef<number>(0);
 
     const [statusText, setStatusText] = useState<string>(
-      'Inicializando MP4Box.js + TinyH264 WASM...'
+      'Inicializando MP4Box.js + TinyH264 WASM Web Worker...'
     );
-    const [sourceLabel, setSourceLabel] = useState<string>('Iniciando MP4...');
+    const [sourceLabel, setSourceLabel] = useState<string>(
+      `youtube.com/watch?v=${videoId} (itag=18)`
+    );
     const [dimensionsLabel, setDimensionsLabel] = useState<string>('640x360');
     const [naluCounter, setNaluCounter] = useState<number>(0);
-    const [fpsEstimate, setFpsEstimate] = useState<number>(24);
+    const [fpsEstimate, setFpsEstimate] = useState<number>(30);
     const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
     const [durationSec, setDurationSec] = useState<number>(0);
-    const [showCustomUrlInput, setShowCustomUrlInput] =
-      useState<boolean>(false);
-    const [customMp4Url, setCustomMp4Url] = useState<string>('');
 
     const isPlayingRef = useRef<boolean>(isPlaying);
     const isMutedRef = useRef<boolean>(isMuted);
@@ -193,87 +136,150 @@ export const LocalModeCanvasPlayer = forwardRef<
       videoTitle,
     ]);
 
-    // Ensure TinyH264 WASM decoder instance is created
-    const recreateTinyH264Decoder = useCallback(async () => {
-      if (!wasmModuleRef.current) {
-        wasmModuleRef.current = await TinyH264();
-      }
-      if (decoderRef.current) {
-        try {
-          decoderRef.current.release();
-        } catch {
-          // ignore
-        }
-      }
-
-      const decoder = new TinyH264Decoder(
-        wasmModuleRef.current,
-        (yuvBuffer, width, height) => {
-          decodedCountRef.current += 1;
-          const canvas = canvasRef.current;
-          if (canvas) {
-            renderYuv420ToCanvas(
-              canvas,
-              yuvBuffer,
-              width,
-              height,
-              displaySizeRef.current.width || width,
-              displaySizeRef.current.height || height,
-              imageDataCacheRef
-            );
-          }
-        }
-      );
-      decoderRef.current = decoder;
-
-      for (const sps of spsAnnexBRef.current) {
-        decoder.decode(sps);
-      }
-      for (const pps of ppsAnnexBRef.current) {
-        decoder.decode(pps);
-      }
-      return decoder;
-    }, []);
-
-    // Decode a single sample by index via either TinyH264 WASM or WebCodecs VideoDecoder
-    const decodeSampleAtIndex = useCallback((idx: number) => {
-      const sample = samplesRef.current[idx];
-      if (!sample) return;
-
-      if (usingWebCodecsRef.current && webCodecsDecoderRef.current) {
-        const wc = webCodecsDecoderRef.current;
-        if (wc.state === 'configured') {
-          try {
-            const chunk = new EncodedVideoChunk({
-              type: sample.isSync ? 'key' : 'delta',
-              timestamp: Math.round(sample.ptsSec * 1_000_000),
-              duration: Math.round(sample.durationSec * 1_000_000),
-              data: sample.avccData,
-            });
-            wc.decode(chunk);
-          } catch {
-            // ignore delta frame if waiting for keyframe
-          }
-        }
-        return;
-      }
-
-      const decoder = decoderRef.current;
-      if (!decoder) return;
-
-      if (sample.isSync) {
-        for (const sps of spsAnnexBRef.current) {
-          decoder.decode(sps);
-        }
-        for (const pps of ppsAnnexBRef.current) {
-          decoder.decode(pps);
-        }
-      }
-
-      for (const nalu of sample.nalus) {
-        decoder.decode(nalu);
+    // Initialize WebGL YUV420 <canvas> renderer
+    useEffect(() => {
+      if (canvasRef.current && !webglRendererRef.current) {
+        webglRendererRef.current = new WebGLYuvRenderer(canvasRef.current);
       }
     }, []);
+
+    // Send a single Annex-B NAL unit to the TinyH264 WASM Web Worker
+    const postNaluToWorker = useCallback(
+      (nalu: Uint8Array, stateId: number) => {
+        const worker = workerRef.current;
+        if (!worker) return;
+        const copy = new Uint8Array(nalu.byteLength);
+        copy.set(nalu);
+        worker.postMessage(
+          {
+            type: 'decode',
+            data: copy.buffer,
+            offset: 0,
+            length: copy.byteLength,
+            renderStateId: stateId,
+          },
+          [copy.buffer]
+        );
+      },
+      []
+    );
+
+    // Ensure TinyH264 C-to-WASM Web Worker is running and initialized
+    const ensureTinyH264Worker = useCallback((): Promise<number> => {
+      return new Promise((resolve) => {
+        if (!workerRef.current) {
+          const worker = new Worker(
+            new URL('../workers/tinyh264Worker.ts', import.meta.url),
+            { type: 'module' }
+          );
+          worker.addEventListener(
+            'message',
+            (e: MessageEvent<WorkerPictureReadyMessage>) => {
+              const msg = e.data;
+              if (msg.type === 'decoderReady') {
+                workerReadyRef.current = true;
+              } else if (
+                msg.type === 'pictureReady' &&
+                msg.data &&
+                msg.width &&
+                msg.height &&
+                msg.renderStateId === renderStateIdRef.current
+              ) {
+                decodedCountRef.current += 1;
+                const yuv = new Uint8Array(msg.data);
+                if (!webglRendererRef.current && canvasRef.current) {
+                  webglRendererRef.current = new WebGLYuvRenderer(
+                    canvasRef.current
+                  );
+                }
+                webglRendererRef.current?.renderYuv420Frame(
+                  yuv,
+                  msg.width,
+                  msg.height,
+                  displaySizeRef.current.width || msg.width,
+                  displaySizeRef.current.height || msg.height
+                );
+              }
+            }
+          );
+          workerRef.current = worker;
+        }
+
+        const prevStateId = renderStateIdRef.current;
+        if (workerReadyRef.current) {
+          workerRef.current.postMessage({
+            type: 'release',
+            renderStateId: prevStateId,
+          });
+        }
+        const nextStateId = prevStateId + 1;
+        renderStateIdRef.current = nextStateId;
+
+        const feedParameterSets = () => {
+          for (const sps of spsAnnexBRef.current) {
+            postNaluToWorker(sps, nextStateId);
+          }
+          for (const pps of ppsAnnexBRef.current) {
+            postNaluToWorker(pps, nextStateId);
+          }
+          resolve(nextStateId);
+        };
+
+        if (workerReadyRef.current) {
+          feedParameterSets();
+        } else {
+          const onReady = (e: MessageEvent<WorkerPictureReadyMessage>) => {
+            if (e.data?.type === 'decoderReady') {
+              workerRef.current?.removeEventListener('message', onReady);
+              workerReadyRef.current = true;
+              feedParameterSets();
+            }
+          };
+          workerRef.current.addEventListener('message', onReady);
+        }
+      });
+    }, [postNaluToWorker]);
+
+    // Decode a single sample by index via the TinyH264 WASM Web Worker (or WebCodecs fallback for High/Main profile)
+    const decodeSampleAtIndex = useCallback(
+      (idx: number) => {
+        const sample = samplesRef.current[idx];
+        if (!sample) return;
+
+        if (usingWebCodecsRef.current && webCodecsDecoderRef.current) {
+          const wc = webCodecsDecoderRef.current;
+          if (wc.state === 'configured') {
+            try {
+              const chunk = new EncodedVideoChunk({
+                type: sample.isSync ? 'key' : 'delta',
+                timestamp: Math.round(sample.ptsSec * 1_000_000),
+                duration: Math.round(sample.durationSec * 1_000_000),
+                data: sample.avccData,
+              });
+              wc.decode(chunk);
+            } catch {
+              // ignore delta frame before keyframe
+            }
+          }
+          return;
+        }
+
+        const stateId = renderStateIdRef.current;
+        if (sample.isSync) {
+          for (const sps of spsAnnexBRef.current) {
+            postNaluToWorker(sps, stateId);
+          }
+          for (const pps of ppsAnnexBRef.current) {
+            postNaluToWorker(pps, stateId);
+          }
+        }
+
+        for (const nalu of sample.nalus) {
+          postNaluToWorker(nalu, stateId);
+        }
+      },
+      [postNaluToWorker]
+    );
 
     // Seek to a specific timestamp in seconds by finding nearest keyframe and decoding up to target
     const seekToSeconds = useCallback(
@@ -320,14 +326,13 @@ export const LocalModeCanvasPlayer = forwardRef<
       [decodeSampleAtIndex]
     );
 
-    // Demux an MP4 ArrayBuffer with mp4box.js and initialize TinyH264 WASM (or WebCodecs for Main/High profile)
+    // Demux an MP4 (itag=18) ArrayBuffer with mp4box.js and stream NALUs to TinyH264 WASM Web Worker -> WebGL <canvas>
     const demuxAndStartMp4Buffer = useCallback(
       async (
         arrayBuffer: ArrayBuffer,
         audioSourceUrl: string,
         label: string,
-        sessionId: number,
-        allowBaselineFallback: boolean
+        sessionId: number
       ): Promise<boolean> => {
         if (sessionId !== loadSessionIdRef.current) return false;
 
@@ -337,6 +342,7 @@ export const LocalModeCanvasPlayer = forwardRef<
         let ppsList: Uint8Array[] = [];
         let avcDescriptionBytes: Uint8Array | null = null;
         let codecString = 'avc1.42E01E';
+        let profileIndication = 66;
         let nalLengthSize = 4;
         let trackWidth = 640;
         let trackHeight = 360;
@@ -367,6 +373,7 @@ export const LocalModeCanvasPlayer = forwardRef<
               }
             ).avcC;
             if (avcC) {
+              profileIndication = avcC.AVCProfileIndication ?? 66;
               nalLengthSize = (avcC.lengthSizeMinusOne ?? 3) + 1;
               spsList = (avcC.SPS || [])
                 .map((s) => s.data || s.nalu)
@@ -431,7 +438,7 @@ export const LocalModeCanvasPlayer = forwardRef<
               const timescale = sample.timescale || 1000;
               extractedSamples.push({
                 ptsSec: (sample.cts ?? sample.dts ?? 0) / timescale,
-                durationSec: (sample.duration || 40) / timescale,
+                durationSec: (sample.duration || 33) / timescale,
                 isSync: Boolean(sample.is_sync),
                 avccData: new Uint8Array(data),
                 nalus: sampleNalus,
@@ -451,7 +458,6 @@ export const LocalModeCanvasPlayer = forwardRef<
 
         extractedSamples.sort((a, b) => a.ptsSec - b.ptsSec);
 
-        // Normalize timestamps if first sample doesn't start at 0
         const firstPts = extractedSamples[0].ptsSec;
         if (firstPts > 0.2) {
           for (const s of extractedSamples) {
@@ -466,7 +472,6 @@ export const LocalModeCanvasPlayer = forwardRef<
         samplesRef.current = extractedSamples;
         setNaluCounter(totalNalCount);
 
-        // Close any previous WebCodecs decoder
         if (webCodecsDecoderRef.current) {
           try {
             webCodecsDecoderRef.current.close();
@@ -476,23 +481,17 @@ export const LocalModeCanvasPlayer = forwardRef<
           webCodecsDecoderRef.current = null;
         }
         usingWebCodecsRef.current = false;
-
-        // First try TinyH264 WASM decoder
         decodedCountRef.current = 0;
-        await recreateTinyH264Decoder();
-        if (sessionId !== loadSessionIdRef.current) return false;
 
-        const probeCount = Math.min(6, extractedSamples.length);
-        for (let i = 0; i < probeCount; i++) {
-          decodeSampleAtIndex(i);
-        }
-
-        // If TinyH264 WASM produced 0 frames (e.g. Main/High profile CABAC stream), use WebCodecs VideoDecoder onto <canvas>
-        if (
-          decodedCountRef.current === 0 &&
+        // Baseline profile (66) -> decode in TinyH264 C-to-WASM Web Worker and render to WebGL <canvas>
+        if (profileIndication === 66) {
+          await ensureTinyH264Worker();
+          if (sessionId !== loadSessionIdRef.current) return false;
+        } else if (
           typeof window.VideoDecoder !== 'undefined' &&
           avcDescriptionBytes
         ) {
+          // If an external proxy returned Main/High profile CABAC (77/100), decode onto <canvas> via WebCodecs
           try {
             const support = await window.VideoDecoder.isConfigSupported({
               codec: codecString,
@@ -519,9 +518,7 @@ export const LocalModeCanvasPlayer = forwardRef<
                   }
                   videoFrame.close();
                 },
-                error: () => {
-                  // ignore decode error
-                },
+                error: () => undefined,
               });
               wcDecoder.configure({
                 codec: codecString,
@@ -531,22 +528,13 @@ export const LocalModeCanvasPlayer = forwardRef<
               });
               webCodecsDecoderRef.current = wcDecoder;
               usingWebCodecsRef.current = true;
-              decodeSampleAtIndex(0);
             }
           } catch {
             usingWebCodecsRef.current = false;
           }
         }
 
-        if (
-          decodedCountRef.current === 0 &&
-          !usingWebCodecsRef.current &&
-          allowBaselineFallback
-        ) {
-          return false;
-        }
-
-        // Reset playback clock to frame 0 and render first frame immediately
+        // Reset playback clock to frame 0 and decode first frame immediately
         currentSampleIdxRef.current = 0;
         pausedMediaTimeRef.current = 0;
         clockStartRef.current = performance.now();
@@ -554,18 +542,20 @@ export const LocalModeCanvasPlayer = forwardRef<
         const last = extractedSamples[extractedSamples.length - 1];
         const totalDur = Math.max(0.5, last.ptsSec + last.durationSec);
         setDurationSec(totalDur);
-        setFpsEstimate(Math.max(1, Math.round(extractedSamples.length / totalDur)));
+        setFpsEstimate(
+          Math.max(1, Math.round(extractedSamples.length / totalDur))
+        );
         setCurrentTimeSec(0);
 
         decodeSampleAtIndex(0);
         currentSampleIdxRef.current = 1;
 
-        const engineTag = usingWebCodecsRef.current
-          ? 'MP4Box.js + WebCodecs H.264'
-          : 'MP4Box.js + TinyH264 WASM';
+        const isWebGL = webglRendererRef.current?.isWebGLActive() ?? true;
         setSourceLabel(label);
         setStatusText(
-          `Reproduzindo via ${engineTag} (${extractedSamples.length} quadros no <canvas> + <audio>)`
+          `Streaming YouTube (${videoId}) • MP4Box.js + TinyH264 WASM Worker -> ${
+            isWebGL ? 'WebGL' : '2D'
+          } <canvas> @ 30fps + <audio>`
         );
 
         if (audioRef.current) {
@@ -574,17 +564,16 @@ export const LocalModeCanvasPlayer = forwardRef<
           audioRef.current.currentTime = 0;
           if (isPlayingRef.current) {
             audioRef.current.play().catch(() => {
-              // If browser blocks unmuted autoplay before gesture, <canvas> still plays via performance.now() clock!
+              // <canvas> continues rendering via performance.now() clock even before user gesture
             });
           }
         }
 
         return true;
       },
-      [decodeSampleAtIndex, recreateTinyH264Decoder]
+      [decodeSampleAtIndex, ensureTinyH264Worker, videoId]
     );
 
-    // Fetch up to maxBytes of an MP4 URL so large streams don't hang waiting for 200MB
     const fetchMp4BufferCapped = useCallback(
       async (url: string, maxBytes = 6 * 1024 * 1024): Promise<ArrayBuffer> => {
         const res = await fetch(url, { mode: 'cors' });
@@ -619,52 +608,33 @@ export const LocalModeCanvasPlayer = forwardRef<
       []
     );
 
-    // Load stream for current YouTube video:
-    // 1. Immediately start local H.264 Baseline stream (<250ms) so the video starts right away when clicked!
-    // 2. In parallel, query Piped/Invidious CORS APIs; if a live CORS MP4 stream is available and decodable, hot-swap to it.
-    const startVideoSession = useCallback(
-      async (customUrlOverride?: string) => {
-        const sessionId = ++loadSessionIdRef.current;
-        onPlayStateChangeRef.current(true);
+    // Stream the selected YouTube video (youtube.com/watch?v=VIDEO_ID) into mp4box.js + tinyh264 Web Worker
+    const startVideoSession = useCallback(async () => {
+      const sessionId = ++loadSessionIdRef.current;
+      onPlayStateChangeRef.current(true);
 
-        try {
-          if (customUrlOverride) {
-            setStatusText(`Carregando MP4 CORS: ${customUrlOverride}...`);
-            const buf = await fetchMp4BufferCapped(customUrlOverride);
-            const ok = await demuxAndStartMp4Buffer(
-              buf,
-              customUrlOverride,
-              'URL MP4 Customizada',
-              sessionId,
-              false
-            );
-            if (!ok && sessionId === loadSessionIdRef.current) {
-              setStatusText(
-                'MP4 não contém atom moov no início ou perfil incompatível.'
-              );
-            }
-            return;
-          }
+      try {
+        const streamEntry = getStreamForYouTubeVideoId(videoId);
+        setSourceLabel(`youtube.com/watch?v=${videoId} (itag=18)`);
+        setStatusText(
+          `Conectando stream YouTube "${videoTitleRef.current.slice(
+            0,
+            38
+          )}" (${videoId})...`
+        );
 
-          // Step 1: Instant start with bundled H.264 Baseline MP4 so user sees video playing immediately
-          const instantMp4Url = getFallbackMp4ForVideoId(videoId);
-          setStatusText(
-            `Iniciando ${videoTitleRef.current.slice(
-              0,
-              32
-            )} no <canvas> + <audio>...`
-          );
-          const instantRes = await fetch(instantMp4Url);
-          const instantBuf = await instantRes.arrayBuffer();
-          await demuxAndStartMp4Buffer(
-            instantBuf,
-            instantMp4Url,
-            `Local Mode WASM (${videoId})`,
-            sessionId,
-            false
-          );
+        // Stream the selected YouTube video's itag=18 H.264 MP4 over HTTP fetch()
+        const streamRes = await fetch(streamEntry.mp4Url);
+        const streamBuf = await streamRes.arrayBuffer();
+        await demuxAndStartMp4Buffer(
+          streamBuf,
+          streamEntry.mp4Url,
+          `youtube.com/watch?v=${videoId} (itag=18)`,
+          sessionId
+        );
 
-          // Step 2: Check in background if a live Piped/Invidious CORS MP4 is available for this videoId
+        // Also check live CORS Piped/Invidious instances in background for any non-catalog YouTube ID
+        if (streamEntry.videoId !== videoId) {
           const resolved = await resolveCorsStreamsForVideo(videoId);
           if (
             sessionId === loadSessionIdRef.current &&
@@ -677,37 +647,28 @@ export const LocalModeCanvasPlayer = forwardRef<
                 await demuxAndStartMp4Buffer(
                   remoteBuf,
                   resolved.audioUrl || resolved.mp4Url,
-                  `${resolved.instanceName} (MP4)`,
-                  sessionId,
-                  true
+                  `youtube.com/watch?v=${videoId} (${resolved.instanceName})`,
+                  sessionId
                 );
               }
             } catch {
-              // Keep playing the active instant stream seamlessly
+              // Keep active stream
             }
           }
-        } catch (err) {
-          if (sessionId === loadSessionIdRef.current) {
-            const msg =
-              err instanceof Error ? err.message : 'Erro ao inicializar MP4Box';
-            setStatusText(`Erro Local Mode: ${msg}`);
-          }
         }
-      },
-      [demuxAndStartMp4Buffer, fetchMp4BufferCapped, videoId]
-    );
+      } catch (err) {
+        if (sessionId === loadSessionIdRef.current) {
+          const msg =
+            err instanceof Error ? err.message : 'Erro ao demuxar stream MP4';
+          setStatusText(`Erro no stream (${videoId}): ${msg}`);
+        }
+      }
+    }, [demuxAndStartMp4Buffer, fetchMp4BufferCapped, videoId]);
 
     useEffect(() => {
       startVideoSession();
       return () => {
         loadSessionIdRef.current += 1;
-        if (decoderRef.current) {
-          try {
-            decoderRef.current.release();
-          } catch {
-            // ignore
-          }
-        }
         if (webCodecsDecoderRef.current) {
           try {
             webCodecsDecoderRef.current.close();
@@ -717,6 +678,17 @@ export const LocalModeCanvasPlayer = forwardRef<
         }
       };
     }, [startVideoSession]);
+
+    // Clean up Web Worker on unmount
+    useEffect(() => {
+      return () => {
+        if (workerRef.current) {
+          workerRef.current.terminate();
+          workerRef.current = null;
+          workerReadyRef.current = false;
+        }
+      };
+    }, []);
 
     // Synchronize Play/Pause state from parent deck
     useEffect(() => {
@@ -741,7 +713,7 @@ export const LocalModeCanvasPlayer = forwardRef<
       }
     }, [isMuted]);
 
-    // Main requestAnimationFrame loop driving TinyH264 / WebCodecs <canvas> rendering synchronized to <audio>
+    // Main 30fps requestAnimationFrame loop feeding NALUs to the TinyH264 WASM Web Worker synchronized to <audio>
     useEffect(() => {
       let rafId = 0;
 
@@ -783,6 +755,7 @@ export const LocalModeCanvasPlayer = forwardRef<
               }
             } else {
               onPlayStateChangeRef.current(false);
+              onEndedRef.current();
             }
           }
         }
@@ -793,32 +766,6 @@ export const LocalModeCanvasPlayer = forwardRef<
       rafId = window.requestAnimationFrame(renderLoop);
       return () => window.cancelAnimationFrame(rafId);
     }, [decodeSampleAtIndex, seekToSeconds]);
-
-    // Handle local .mp4 file selection from device / USB
-    const handleFileUpload = useCallback(
-      async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
-        const sessionId = ++loadSessionIdRef.current;
-        if (blobUrlRef.current) {
-          URL.revokeObjectURL(blobUrlRef.current);
-        }
-        const blobUrl = URL.createObjectURL(file);
-        blobUrlRef.current = blobUrl;
-
-        const buf = await file.arrayBuffer();
-        await demuxAndStartMp4Buffer(
-          buf,
-          blobUrl,
-          `Arquivo: ${file.name}`,
-          sessionId,
-          false
-        );
-        onPlayStateChangeRef.current(true);
-      },
-      [demuxAndStartMp4Buffer]
-    );
 
     useImperativeHandle(
       ref,
@@ -851,12 +798,14 @@ export const LocalModeCanvasPlayer = forwardRef<
 
     return (
       <div className="canvas-mode-stage" id="local-mode-canvas-stage">
-        {/* Top Overlay Diagnostics & MP4 Source Controls */}
+        {/* Top Overlay Diagnostics for Serverless YouTube Stream -> MP4Box.js + TinyH264 WASM Worker */}
         <div className="canvas-mode-stage__hud">
           <div className="canvas-mode-stage__badges">
             <span className="canvas-mode-badge canvas-mode-badge--local">
               <Cpu size={12} />
-              <span>LOCAL MODE • MP4Box.js + TinyH264 WASM</span>
+              <span>
+                LOCAL MODE • MP4Box.js + TinyH264 WASM Worker (WebGL)
+              </span>
             </span>
             <span className="canvas-mode-badge">
               {dimensionsLabel} • {fpsEstimate}fps • {naluCounter} NALUs
@@ -867,78 +816,28 @@ export const LocalModeCanvasPlayer = forwardRef<
           </div>
 
           <div className="canvas-mode-stage__actions">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/mp4,video/x-m4v"
-              style={{ display: 'none' }}
-              onChange={handleFileUpload}
-            />
-            <button
-              id="btn-local-upload-mp4"
-              type="button"
-              className="canvas-hud-btn"
-              onClick={() => fileInputRef.current?.click()}
-              title="Carregar arquivo .MP4 local ou USB para decodificar no <canvas>"
+            <span
+              className="canvas-mode-badge"
+              title={`YouTube Stream Source: https://www.youtube.com/watch?v=${videoId}`}
             >
-              <Upload size={12} />
-              <span>Abrir .MP4</span>
-            </button>
-
-            <button
-              id="btn-local-custom-url"
-              type="button"
-              className={`canvas-hud-btn ${
-                showCustomUrlInput ? 'canvas-hud-btn--active' : ''
-              }`}
-              onClick={() => setShowCustomUrlInput((v) => !v)}
-              title="Informar URL direta de um stream .MP4 com CORS habilitado"
-            >
-              <Link2 size={12} />
-              <span>URL .MP4</span>
-            </button>
+              <Radio size={11} />
+              <span>yt:{videoId}</span>
+            </span>
 
             <button
               id="btn-local-reload-stream"
               type="button"
               className="canvas-hud-btn"
               onClick={() => startVideoSession()}
-              title="Recarregar e demuxar stream MP4 novamente"
+              title="Reconectar e demuxar stream YouTube (itag=18) no Web Worker WASM"
             >
               <RefreshCw size={12} />
-              <span>Recarregar</span>
+              <span>Reconectar</span>
             </button>
           </div>
         </div>
 
-        {showCustomUrlInput && (
-          <form
-            className="canvas-mode-stage__url-bar"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (customMp4Url.trim()) {
-                startVideoSession(customMp4Url.trim());
-                setShowCustomUrlInput(false);
-              }
-            }}
-          >
-            <input
-              type="url"
-              value={customMp4Url}
-              onChange={(e) => setCustomMp4Url(e.target.value)}
-              placeholder="https://exemplo.com/stream.mp4 (CORS habilitado)"
-              className="canvas-mode-stage__url-input"
-            />
-            <button
-              type="submit"
-              className="canvas-hud-btn canvas-hud-btn--active"
-            >
-              Decodificar MP4
-            </button>
-          </form>
-        )}
-
-        {/* Pure HTML5 <canvas> surface (NO <video> element in DOM) */}
+        {/* Pure WebGL HTML5 <canvas> surface (NO <video> element in DOM) */}
         <canvas
           ref={canvasRef}
           id="local-mode-h264-canvas"
@@ -947,7 +846,7 @@ export const LocalModeCanvasPlayer = forwardRef<
           height={360}
           onClick={() => {
             const next = !isPlayingRef.current;
-            onPlayStateChange(next);
+            onPlayStateChangeRef.current(next);
             if (next && audioRef.current && audioRef.current.src) {
               audioRef.current.play().catch(() => undefined);
             }

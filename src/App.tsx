@@ -14,6 +14,7 @@ import {
   DEFAULT_PLAYLISTS,
   DEFAULT_LIKED_VIDEOS,
   DEFAULT_SUBSCRIPTIONS,
+  LEGACY_VIDEO_ID_MAP,
 } from './data/mockYoutubeData';
 import {
   YOUTUBE_READONLY_SCOPE,
@@ -38,6 +39,14 @@ const STORAGE_KEYS = {
   LIKED_VIDEOS: 'tesla_play_liked_videos_v1',
   HARDWARE_PROFILE: 'tesla_play_mcu_profile_v1',
 };
+
+function normalizeLegacyVideoList(list: YouTubeVideo[]): YouTubeVideo[] {
+  return list.map((item) => {
+    const mappedId = LEGACY_VIDEO_ID_MAP[item.id] || item.id;
+    const catalogMatch = DEFAULT_FEATURED_VIDEOS.find((v) => v.id === mappedId);
+    return catalogMatch || { ...item, id: mappedId };
+  });
+}
 
 export function App() {
   // Navigation State (Drive mode is always standard)
@@ -102,7 +111,9 @@ export function App() {
   const [likedVideos, setLikedVideos] = useState<YouTubeVideo[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.LIKED_VIDEOS);
-      if (raw) return JSON.parse(raw) as YouTubeVideo[];
+      if (raw) {
+        return normalizeLegacyVideoList(JSON.parse(raw) as YouTubeVideo[]);
+      }
     } catch {
       // ignore
     }
@@ -111,7 +122,9 @@ export function App() {
   const [watchHistory, setWatchHistory] = useState<YouTubeVideo[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.WATCH_HISTORY);
-      if (raw) return JSON.parse(raw) as YouTubeVideo[];
+      if (raw) {
+        return normalizeLegacyVideoList(JSON.parse(raw) as YouTubeVideo[]);
+      }
     } catch {
       // ignore
     }

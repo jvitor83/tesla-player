@@ -5,42 +5,50 @@ import type {
   ReservedModuleSpec,
 } from '../types/tesla';
 
+export const LEGACY_VIDEO_ID_MAP: Record<string, string> = {
+  jfKfPfyJRdk: 'CFGLoQIhmow',
+  CyUg9bC1M1E: 'Qfj4urMF8CU',
+  '21X5lGlDOfg': 'usZ9os-5b-M',
+  '4xDzrJKXOOY': 'TlWYgGyNnJo',
+  'y7e-GC6oGhg': 'WhWc3b3KhnY',
+};
+
 export const DEFAULT_FEATURED_VIDEOS: YouTubeVideo[] = [
   {
-    id: 'jfKfPfyJRdk',
-    title: 'lofi hip hop radio - beats to relax/study/drive to',
+    id: 'CFGLoQIhmow',
+    title: 'lofi hip hop mix - beats to relax/study/drive to',
     channelTitle: 'Lofi Girl',
     channelId: 'UCSJ4gkVC6NrvII8umztf0Ow',
-    thumbnail: 'https://i.ytimg.com/vi/jfKfPfyJRdk/hqdefault.jpg',
-    publishedAt: 'Ao Vivo 24/7',
-    duration: 'AO VIVO',
+    thumbnail: 'https://i.ytimg.com/vi/CFGLoQIhmow/hqdefault.jpg',
+    publishedAt: 'Mix Contínuo',
+    duration: '2:50:40',
     viewCount: '68K assistindo',
     description:
       'Trilha sonora contínua de baixo consumo de CPU ideal para viagens noturnas e cruzeiro em Autopilot.',
   },
   {
-    id: 'CyUg9bC1M1E',
-    title: 'We, Robot | Tesla Cybercab & Robovan Official Event',
+    id: 'Qfj4urMF8CU',
+    title: 'Cybercab | The Future is Autonomous (Tesla Official)',
     channelTitle: 'Tesla',
     channelId: 'UC5WjFrtBdufl6CZojX3D8dQ',
-    thumbnail: 'https://i.ytimg.com/vi/CyUg9bC1M1E/hqdefault.jpg',
-    publishedAt: 'Out 2024',
-    duration: '53:12',
+    thumbnail: 'https://i.ytimg.com/vi/Qfj4urMF8CU/hqdefault.jpg',
+    publishedAt: 'Tesla Oficial',
+    duration: '00:51',
     viewCount: '4.9M visualizações',
     description:
-      'Apresentação oficial do ecossistema autônomo Tesla Cybercab, Robovan e Optimus.',
+      'Apresentação oficial do ecossistema autônomo Tesla Cybercab e condução autônoma.',
   },
   {
-    id: '21X5lGlDOfg',
-    title: 'NASA Live: Official Stream of NASA TV',
-    channelTitle: 'NASA',
+    id: 'usZ9os-5b-M',
+    title: 'NASA ISS 4K: Earth From Inside the International Space Station Cupola',
+    channelTitle: 'NASA / ISS',
     channelId: 'UCLA_DiR1FfKNvjuUpBHmylQ',
-    thumbnail: 'https://i.ytimg.com/vi/21X5lGlDOfg/hqdefault.jpg',
-    publishedAt: 'Ao Vivo',
-    duration: 'AO VIVO',
+    thumbnail: 'https://i.ytimg.com/vi/usZ9os-5b-M/hqdefault.jpg',
+    publishedAt: 'ISS 4K',
+    duration: '00:44',
     viewCount: '19K assistindo',
     description:
-      'Transmissão oficial contínua da NASA TV diretamente da Estação Espacial Internacional (ISS) e missões orbitais.',
+      'Vista oficial da Terra em 4K diretamente da cúpula da Estação Espacial Internacional (ISS) em órbita.',
   },
   {
     id: 'aqz-KE-bpKQ',
@@ -79,28 +87,28 @@ export const DEFAULT_FEATURED_VIDEOS: YouTubeVideo[] = [
       'Curta-metragem de ficção científica em live-action e CGI para reprodução contínua na tela central de 15" e 17".',
   },
   {
-    id: '4xDzrJKXOOY',
-    title: 'synthwave radio - chill synth / retrobeats to drive to',
+    id: 'TlWYgGyNnJo',
+    title: '1 A.M Chill Session - synthwave / retrobeats to drive to',
     channelTitle: 'Lofi Girl Synthwave',
     channelId: 'UCSJ4gkVC6NrvII8umztf0Ow',
-    thumbnail: 'https://i.ytimg.com/vi/4xDzrJKXOOY/hqdefault.jpg',
-    publishedAt: 'Ao Vivo 24/7',
-    duration: 'AO VIVO',
+    thumbnail: 'https://i.ytimg.com/vi/TlWYgGyNnJo/hqdefault.jpg',
+    publishedAt: 'Synthwave Mix',
+    duration: '2:29:12',
     viewCount: '12K assistindo',
     description:
       'Synthwave instrumental contínuo projetado para condução noturna com alto contraste.',
   },
   {
-    id: 'y7e-GC6oGhg',
-    title: 'Charge - Blender Open Movie (Cyberpunk Action Short)',
+    id: 'WhWc3b3KhnY',
+    title: 'Spring - Blender Open Movie (Blender Studio Official)',
     channelTitle: 'Blender Studio',
     channelId: 'UC2U53B3f8F6fL8W-K1c-hCw',
-    thumbnail: 'https://i.ytimg.com/vi/y7e-GC6oGhg/hqdefault.jpg',
-    publishedAt: 'Cyberpunk HD',
-    duration: '03:54',
-    viewCount: '3.1M visualizações',
+    thumbnail: 'https://i.ytimg.com/vi/WhWc3b3KhnY/hqdefault.jpg',
+    publishedAt: 'Cinema HD',
+    duration: '07:44',
+    viewCount: '8.4M visualizações',
     description:
-      'Curta-metragem de alto contraste em estética futurista ideal para telas OLED/LCD automotivas.',
+      'Curta-metragem de alto contraste da Blender Studio ideal para telas OLED/LCD automotivas.',
   },
 ];
 
@@ -110,7 +118,7 @@ export const DEFAULT_PLAYLISTS: YouTubePlaylist[] = [
     title: 'Night Drive & Supercharger Lounge',
     description:
       'Sessões contínuas de Synthwave, Lofi e Ambient selecionadas para recarga no Supercharger e viagens em rodovia.',
-    thumbnail: 'https://i.ytimg.com/vi/4xDzrJKXOOY/hqdefault.jpg',
+    thumbnail: 'https://i.ytimg.com/vi/TlWYgGyNnJo/hqdefault.jpg',
     itemCount: 4,
     channelTitle: 'Tesla Play Curadoria',
     items: [
@@ -140,7 +148,7 @@ export const DEFAULT_PLAYLISTS: YouTubePlaylist[] = [
     title: 'Engenharia, Espaço & Autonomia',
     description:
       'Transmissões espaciais da NASA e eventos de engenharia automotiva.',
-    thumbnail: 'https://i.ytimg.com/vi/21X5lGlDOfg/hqdefault.jpg',
+    thumbnail: 'https://i.ytimg.com/vi/usZ9os-5b-M/hqdefault.jpg',
     itemCount: 3,
     channelTitle: 'Space & EV Tech',
     items: [
@@ -164,21 +172,21 @@ export const DEFAULT_SUBSCRIPTIONS: YouTubeSubscription[] = [
     channelId: 'UC5WjFrtBdufl6CZojX3D8dQ',
     title: 'Tesla',
     description: 'Canal oficial da Tesla — Veículos elétricos, FSD, Energia e Robótica.',
-    thumbnail: 'https://i.ytimg.com/vi/CyUg9bC1M1E/hqdefault.jpg',
+    thumbnail: 'https://i.ytimg.com/vi/Qfj4urMF8CU/hqdefault.jpg',
   },
   {
     id: 'sub-lofigirl',
     channelId: 'UCSJ4gkVC6NrvII8umztf0Ow',
     title: 'Lofi Girl',
-    description: 'Rádios 24/7 Lofi Hip Hop e Synthwave para dirigir e relaxar.',
-    thumbnail: 'https://i.ytimg.com/vi/jfKfPfyJRdk/hqdefault.jpg',
+    description: 'Rádios e mixes Lofi Hip Hop e Synthwave para dirigir e relaxar.',
+    thumbnail: 'https://i.ytimg.com/vi/CFGLoQIhmow/hqdefault.jpg',
   },
   {
     id: 'sub-nasa',
     channelId: 'UCLA_DiR1FfKNvjuUpBHmylQ',
     title: 'NASA',
-    description: 'Transmissões ao vivo da ISS, lançamentos orbitais e astronomia.',
-    thumbnail: 'https://i.ytimg.com/vi/21X5lGlDOfg/hqdefault.jpg',
+    description: 'Transmissões da ISS, Terra em 4K, lançamentos orbitais e astronomia.',
+    thumbnail: 'https://i.ytimg.com/vi/usZ9os-5b-M/hqdefault.jpg',
   },
   {
     id: 'sub-blender',

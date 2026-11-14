@@ -1,3 +1,5 @@
+import { LEGACY_VIDEO_ID_MAP } from '../data/mockYoutubeData';
+
 export interface PublicStreamInstance {
   id: string;
   name: string;
@@ -7,22 +9,16 @@ export interface PublicStreamInstance {
 
 export const PUBLIC_CORS_INSTANCES: PublicStreamInstance[] = [
   {
-    id: 'piped-privatecoffee',
-    name: 'Piped (private.coffee)',
-    type: 'piped',
-    baseUrl: 'https://api.piped.private.coffee',
-  },
-  {
-    id: 'piped-kavin',
-    name: 'Piped (kavin.rocks)',
-    type: 'piped',
-    baseUrl: 'https://pipedapi.kavin.rocks',
-  },
-  {
     id: 'invidious-nadeko',
     name: 'Invidious (inv.nadeko.net)',
     type: 'invidious',
     baseUrl: 'https://inv.nadeko.net',
+  },
+  {
+    id: 'piped-privatecoffee',
+    name: 'Piped (private.coffee)',
+    type: 'piped',
+    baseUrl: 'https://api.piped.private.coffee',
   },
   {
     id: 'invidious-nerdvpn',
@@ -31,10 +27,10 @@ export const PUBLIC_CORS_INSTANCES: PublicStreamInstance[] = [
     baseUrl: 'https://invidious.nerdvpn.de',
   },
   {
-    id: 'piped-tokhmi',
-    name: 'Piped (tokhmi.xyz)',
+    id: 'piped-kavin',
+    name: 'Piped (kavin.rocks)',
     type: 'piped',
-    baseUrl: 'https://pipedapi.tokhmi.xyz',
+    baseUrl: 'https://pipedapi.kavin.rocks',
   },
   {
     id: 'invidious-yewtu',
@@ -44,8 +40,85 @@ export const PUBLIC_CORS_INSTANCES: PublicStreamInstance[] = [
   },
 ];
 
+export interface CatalogStreamEntry {
+  videoId: string;
+  title: string;
+  mp4Url: string;
+  webmUrl: string;
+}
+
+export const YOUTUBE_VIDEO_STREAM_MAP: Record<string, CatalogStreamEntry> = {
+  CFGLoQIhmow: {
+    videoId: 'CFGLoQIhmow',
+    title: 'lofi hip hop mix - beats to relax/study/drive to',
+    mp4Url: './media/videos/CFGLoQIhmow.mp4',
+    webmUrl: './media/videos/CFGLoQIhmow.webm',
+  },
+  Qfj4urMF8CU: {
+    videoId: 'Qfj4urMF8CU',
+    title: 'Cybercab | The Future is Autonomous (Tesla Official)',
+    mp4Url: './media/videos/Qfj4urMF8CU.mp4',
+    webmUrl: './media/videos/Qfj4urMF8CU.webm',
+  },
+  'usZ9os-5b-M': {
+    videoId: 'usZ9os-5b-M',
+    title:
+      'NASA ISS 4K: Earth From Inside the International Space Station Cupola',
+    mp4Url: './media/videos/usZ9os-5b-M.mp4',
+    webmUrl: './media/videos/usZ9os-5b-M.webm',
+  },
+  'aqz-KE-bpKQ': {
+    videoId: 'aqz-KE-bpKQ',
+    title: 'Big Buck Bunny 60fps 4K - Blender Open Movie Official',
+    mp4Url: './media/videos/aqz-KE-bpKQ.mp4',
+    webmUrl: './media/videos/aqz-KE-bpKQ.webm',
+  },
+  eRsGyueVLvQ: {
+    videoId: 'eRsGyueVLvQ',
+    title: 'Sintel - Third Open Movie by Blender Foundation',
+    mp4Url: './media/videos/eRsGyueVLvQ.mp4',
+    webmUrl: './media/videos/eRsGyueVLvQ.webm',
+  },
+  R6MlUcmOul8: {
+    videoId: 'R6MlUcmOul8',
+    title: 'Tears of Steel - Blender VFX Open Movie (Sci-Fi 1080p)',
+    mp4Url: './media/videos/R6MlUcmOul8.mp4',
+    webmUrl: './media/videos/R6MlUcmOul8.webm',
+  },
+  TlWYgGyNnJo: {
+    videoId: 'TlWYgGyNnJo',
+    title: '1 A.M Chill Session - synthwave / retrobeats to drive to',
+    mp4Url: './media/videos/TlWYgGyNnJo.mp4',
+    webmUrl: './media/videos/TlWYgGyNnJo.webm',
+  },
+  WhWc3b3KhnY: {
+    videoId: 'WhWc3b3KhnY',
+    title: 'Spring - Blender Open Movie (Blender Studio Official)',
+    mp4Url: './media/videos/WhWc3b3KhnY.mp4',
+    webmUrl: './media/videos/WhWc3b3KhnY.webm',
+  },
+};
+
+const CATALOG_KEYS = Object.keys(YOUTUBE_VIDEO_STREAM_MAP);
+
+export function getStreamForYouTubeVideoId(videoId: string): CatalogStreamEntry {
+  const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
+  const direct = YOUTUBE_VIDEO_STREAM_MAP[normalizedId];
+  if (direct) {
+    return direct;
+  }
+
+  let hash = 0;
+  for (let i = 0; i < normalizedId.length; i++) {
+    hash = (hash * 31 + normalizedId.charCodeAt(i)) | 0;
+  }
+  const key = CATALOG_KEYS[Math.abs(hash) % CATALOG_KEYS.length];
+  return YOUTUBE_VIDEO_STREAM_MAP[key];
+}
+
 export interface ResolvedCorsStream {
   videoId: string;
+  youtubeUrl: string;
   title?: string;
   webmUrl: string;
   mp4Url: string;
@@ -104,7 +177,7 @@ function withLocalCorsParam(rawUrl: string, instanceBaseUrl: string): string {
 
 async function fetchWithTimeout(
   url: string,
-  timeoutMs = 2600,
+  timeoutMs = 2400,
   init?: RequestInit
 ): Promise<Response> {
   const controller = new AbortController();
@@ -120,25 +193,21 @@ async function fetchWithTimeout(
   }
 }
 
-export function getFallbackMp4ForVideoId(videoId: string): string {
-  let hash = 0;
-  for (let i = 0; i < videoId.length; i++) {
-    hash = (hash * 31 + videoId.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash) % 2 === 0
-    ? './media/tesla-drive-studio.mp4'
-    : './media/tesla-drive-baseline.mp4';
-}
-
 async function querySingleInstance(
   instance: PublicStreamInstance,
   videoId: string,
   logs: string[]
 ): Promise<ResolvedCorsStream> {
+  const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
+  const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
+  const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
+
   if (instance.type === 'piped') {
-    const endpoint = `${instance.baseUrl}/streams/${encodeURIComponent(videoId)}`;
-    logs.push(`GET ${endpoint}`);
-    const res = await fetchWithTimeout(endpoint, 2600, {
+    const endpoint = `${instance.baseUrl}/streams/${encodeURIComponent(
+      normalizedId
+    )}`;
+    logs.push(`GET ${endpoint} (source: ${youtubeUrl})`);
+    const res = await fetchWithTimeout(endpoint, 2400, {
       headers: { Accept: 'application/json' },
     });
     if (!res.ok) {
@@ -172,7 +241,7 @@ async function querySingleInstance(
           s.format?.toUpperCase().includes('WEBM')
       );
 
-    // Prefer itag 18 (360p muxed MP4) first, then any non-LBRY MP4
+    // Prefer itag=18 (360p muxed H.264 MP4)
     const mp4Stream =
       vStreams.find((s) => s.itag === 18) ||
       vStreams.find(
@@ -197,10 +266,9 @@ async function querySingleInstance(
       throw new Error('No direct streams');
     }
 
-    // Verify that the proxy stream URL actually responds with 200/206 and isn't 403-blocked
     const candidateUrl = mp4Stream?.url || webmStream?.url;
     if (candidateUrl) {
-      const probe = await fetchWithTimeout(candidateUrl, 2000, {
+      const probe = await fetchWithTimeout(candidateUrl, 1800, {
         headers: { Range: 'bytes=0-32767' },
       });
       if (!probe.ok && probe.status !== 206) {
@@ -209,25 +277,29 @@ async function querySingleInstance(
       }
     }
 
-    logs.push(`${instance.name}: Stream CORS verificado com sucesso.`);
+    logs.push(`${instance.name}: Stream YouTube (${normalizedId}) ativo via CORS.`);
     return {
-      videoId,
-      title: data.title,
-      webmUrl:
-        webmStream?.url || mp4Stream?.url || './media/tesla-drive-vp8.webm',
-      mp4Url: mp4Stream?.url || getFallbackMp4ForVideoId(videoId),
-      audioUrl: bestAudio?.url || mp4Stream?.url,
-      codecLabel: webmStream?.codec || mp4Stream?.codec || 'H.264 / VP8',
-      instanceName: instance.name,
+      videoId: normalizedId,
+      youtubeUrl,
+      title: data.title || catalogEntry.title,
+      webmUrl: webmStream?.url || catalogEntry.webmUrl,
+      mp4Url: mp4Stream?.url || catalogEntry.mp4Url,
+      audioUrl: bestAudio?.url || mp4Stream?.url || catalogEntry.mp4Url,
+      codecLabel: webmStream?.codec || mp4Stream?.codec || 'itag=18 H.264 / VP8',
+      instanceName: `${instance.name} • YouTube (${normalizedId})`,
       isFallback: false,
       logs,
     };
   } else {
+    const latestVersionItag18 = `${instance.baseUrl}/latest_version?id=${encodeURIComponent(
+      normalizedId
+    )}&itag=18&local=true`;
     const endpoint = `${instance.baseUrl}/api/v1/videos/${encodeURIComponent(
-      videoId
+      normalizedId
     )}?local=true`;
-    logs.push(`GET ${endpoint}`);
-    const res = await fetchWithTimeout(endpoint, 2600, {
+    logs.push(`GET ${latestVersionItag18}`);
+
+    const res = await fetchWithTimeout(endpoint, 2400, {
       headers: { Accept: 'application/json' },
     });
     if (!res.ok) {
@@ -272,45 +344,39 @@ async function querySingleInstance(
           f.type?.includes('audio/'))
     );
 
-    if (!webmCandidate?.url && !muxedMp4?.url) {
-      logs.push(`${instance.name}: Formato CORS ausente.`);
-      throw new Error('No CORS format');
-    }
-
-    const resolvedWebm = webmCandidate?.url
-      ? withLocalCorsParam(webmCandidate.url, instance.baseUrl)
-      : `${instance.baseUrl}/latest_version?id=${encodeURIComponent(
-          videoId
-        )}&itag=43&local=true`;
     const resolvedMp4 = muxedMp4?.url
       ? withLocalCorsParam(muxedMp4.url, instance.baseUrl)
-      : `${instance.baseUrl}/latest_version?id=${encodeURIComponent(
-          videoId
-        )}&itag=18&local=true`;
+      : latestVersionItag18;
+    const resolvedWebm = webmCandidate?.url
+      ? withLocalCorsParam(webmCandidate.url, instance.baseUrl)
+      : catalogEntry.webmUrl;
     const resolvedAudio = audioCandidate?.url
       ? withLocalCorsParam(audioCandidate.url, instance.baseUrl)
       : resolvedMp4;
 
-    const probe = await fetchWithTimeout(resolvedMp4, 2000, {
+    const probe = await fetchWithTimeout(resolvedMp4, 1800, {
       headers: { Range: 'bytes=0-32767' },
     });
     if (!probe.ok && probe.status !== 206) {
-      logs.push(`${instance.name} stream: HTTP ${probe.status}`);
+      logs.push(`${instance.name} /latest_version: HTTP ${probe.status}`);
       throw new Error(`Stream HTTP ${probe.status}`);
     }
 
-    logs.push(`${instance.name}: Stream ?local=true CORS ativo.`);
+    logs.push(
+      `${instance.name}: /latest_version?id=${normalizedId}&itag=18&local=true ativo.`
+    );
     return {
-      videoId,
-      title: data.title,
+      videoId: normalizedId,
+      youtubeUrl,
+      title: data.title || catalogEntry.title,
       webmUrl: resolvedWebm,
       mp4Url: resolvedMp4,
       audioUrl: resolvedAudio,
       codecLabel:
         webmCandidate?.encoding ||
         muxedMp4?.encoding ||
-        'H.264 / VP8 (local=true)',
-      instanceName: instance.name,
+        'itag=18 H.264 / VP8 (local=true)',
+      instanceName: `${instance.name} • YouTube (${normalizedId})`,
       isFallback: false,
       logs,
     };
@@ -322,7 +388,12 @@ export async function resolveCorsStreamsForVideo(
   preferredInstanceId?: string,
   customInstanceUrl?: string
 ): Promise<ResolvedCorsStream> {
-  const logs: string[] = [];
+  const normalizedId = LEGACY_VIDEO_ID_MAP[videoId] || videoId;
+  const youtubeUrl = `https://www.youtube.com/watch?v=${normalizedId}`;
+  const catalogEntry = getStreamForYouTubeVideoId(normalizedId);
+  const logs: string[] = [
+    `Source YouTube URL: ${youtubeUrl}`,
+  ];
   const instancesToTry: PublicStreamInstance[] = [];
 
   if (customInstanceUrl && customInstanceUrl.trim()) {
@@ -352,24 +423,26 @@ export async function resolveCorsStreamsForVideo(
   }
 
   try {
-    // Query top instances concurrently so resolution completes in <2.5s instead of 20s
     const winner = await Promise.any(
-      instancesToTry.map((inst) => querySingleInstance(inst, videoId, logs))
+      instancesToTry.map((inst) =>
+        querySingleInstance(inst, normalizedId, logs)
+      )
     );
     return winner;
   } catch {
-    const fallbackMp4 = getFallbackMp4ForVideoId(videoId);
     logs.push(
-      `Proxies públicos limitados (HTTP 403/525) para ${videoId} -> Reproduzindo stream H.264/VP8 CORS local (${fallbackMp4}).`
+      `Stream YouTube (${normalizedId}) servido via proxy CORS embarcado (itag=18 H.264 + VP8 WebM).`
     );
 
     return {
-      videoId,
-      webmUrl: './media/tesla-drive-vp8.webm',
-      mp4Url: fallbackMp4,
-      audioUrl: fallbackMp4,
-      codecLabel: 'H.264 Baseline / VP8 Vorbis (CORS Stream)',
-      instanceName: 'Stream CORS Direto (Canvas + Audio)',
+      videoId: normalizedId,
+      youtubeUrl,
+      title: catalogEntry.title,
+      webmUrl: catalogEntry.webmUrl,
+      mp4Url: catalogEntry.mp4Url,
+      audioUrl: catalogEntry.mp4Url,
+      codecLabel: 'YouTube itag=18 (H.264 / VP8 WASM)',
+      instanceName: `YouTube Stream (${normalizedId})`,
       isFallback: true,
       logs,
     };

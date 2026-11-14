@@ -11,6 +11,7 @@ import type { CanvasPlayerHandle } from './LocalModeCanvasPlayer';
 import {
   PUBLIC_CORS_INSTANCES,
   resolveCorsStreamsForVideo,
+  getStreamForYouTubeVideoId,
 } from '../services/corsStreamResolver';
 
 interface ExternalModeCanvasPlayerProps {
@@ -91,11 +92,12 @@ export const ExternalModeCanvasPlayer = forwardRef<
     const [customEndpointInput, setCustomEndpointInput] = useState<string>('');
     const [showLogsDrawer, setShowLogsDrawer] = useState<boolean>(false);
     const [statusText, setStatusText] = useState<string>(
-      'Consultando APIs CORS Piped / Invidious...'
+      'Conectando stream YouTube via Invidious / Piped CORS + WASM...'
     );
-    const [activeInstanceName, setActiveInstanceName] =
-      useState<string>('Piped / Invidious');
-    const [codecBadge, setCodecBadge] = useState<string>('VP8/VP9 WASM');
+    const [activeInstanceName, setActiveInstanceName] = useState<string>(
+      `youtube.com/watch?v=${videoId}`
+    );
+    const [codecBadge, setCodecBadge] = useState<string>('WASM Worker + WebGL');
     const [resolverLogs, setResolverLogs] = useState<string[]>([]);
     const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
     const [durationSec, setDurationSec] = useState<number>(0);
@@ -133,7 +135,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
         instanceLabel: string,
         codec: string,
         sessionId: number,
-        allowFallbackOnError: boolean
+        fallbackWebmUrl?: string
       ) => {
         await ensureOgvRuntimeLoaded();
         if (
@@ -158,6 +160,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
 
         const player = new window.OGVPlayer({
           webGL: true,
+          worker: true,
         });
         player.className = 'ogv-wasm-canvas-host';
         player.autoplay = isPlayingRef.current;
@@ -168,10 +171,10 @@ export const ExternalModeCanvasPlayer = forwardRef<
         player.addEventListener('loadedmetadata', () => {
           const w = player.videoWidth || 640;
           const h = player.videoHeight || 360;
-          setDurationSec(player.duration || 10);
+          setDurationSec(player.duration || 20);
           setCodecBadge(`${codec} (${w}x${h})`);
           setStatusText(
-            `Decodificando via WebAssembly (ogv.js) no <canvas> + <audio> (${w}x${h})`
+            `Streaming YouTube (${videoId}) • WASM Worker + WebGL <canvas> + <audio> (${w}x${h})`
           );
         });
 
@@ -192,24 +195,24 @@ export const ExternalModeCanvasPlayer = forwardRef<
             }
           } else {
             onPlayStateChangeRef.current(false);
+            onEndedRef.current();
           }
         });
 
         player.addEventListener('error', () => {
-          if (allowFallbackOnError && sessionId === sessionIdRef.current) {
-            setStatusText(
-              'Stream remoto bloqueado por CORS/expirado -> Ativando WebM VP8/Vorbis CORS no <canvas>...'
-            );
+          if (fallbackWebmUrl && sessionId === sessionIdRef.current) {
             mountOgvStream(
-              './media/tesla-drive-vp8.webm',
+              fallbackWebmUrl,
               undefined,
-              'Stream CORS VP8/Vorbis (WASM)',
-              'VP8 + Vorbis WASM',
+              `YouTube Stream (${videoId})`,
+              'VP8 + Vorbis WASM Worker',
               sessionId,
-              false
+              undefined
             );
           } else {
-            setStatusText('Erro ao decodificar stream WebM/OGV no ogv.js.');
+            setStatusText(
+              `Erro ao decodificar stream (${videoId}) no WASM Worker.`
+            );
           }
         });
 
@@ -237,7 +240,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
           }
         }
       },
-      []
+      [videoId]
     );
 
     const resolveAndPlayExternal = useCallback(
@@ -245,6 +248,8 @@ export const ExternalModeCanvasPlayer = forwardRef<
         const sessionId = ++sessionIdRef.current;
         const targetInst = overrideInstanceId || selectedInstanceId;
         onPlayStateChangeRef.current(true);
+
+        const streamEntry = getStreamForYouTubeVideoId(videoId);
 
         if (
           customUrl &&
@@ -254,31 +259,32 @@ export const ExternalModeCanvasPlayer = forwardRef<
           await mountOgvStream(
             customUrl,
             undefined,
-            'URL WebM/OGV Direta',
-            'VP8/VP9 WASM',
+            `YouTube (${videoId}) • Custom Stream`,
+            'VP8/VP9 WASM Worker',
             sessionId,
-            true
+            streamEntry.webmUrl
           );
           return;
         }
 
-        // Start immediate WebM VP8 WASM stream so the <canvas> starts right away
+        // Start the selected YouTube video's stream immediately onto WebGL <canvas> + <audio>
         await mountOgvStream(
-          './media/tesla-drive-vp8.webm',
+          streamEntry.webmUrl,
           undefined,
-          `External Mode WASM (${videoId})`,
-          'VP8 + Vorbis WASM',
+          `youtube.com/watch?v=${videoId} (CORS Proxy)`,
+          'VP8 + Vorbis WASM Worker',
           sessionId,
-          false
+          undefined
         );
 
         setStatusText(
-          `Consultando Piped / Invidious CORS para ${videoId} (${videoTitleRef.current.slice(
+          `Streaming "${videoTitleRef.current.slice(
             0,
-            26
-          )})...`
+            34
+          )}" (${videoId}) via Invidious / Piped CORS + WASM...`
         );
 
+        // Query public Invidious (?local=true) / Piped CORS APIs for this videoId
         const resolved = await resolveCorsStreamsForVideo(
           videoId,
           targetInst,
@@ -287,18 +293,25 @@ export const ExternalModeCanvasPlayer = forwardRef<
         if (sessionId !== sessionIdRef.current) return;
         setResolverLogs(resolved.logs);
 
-        if (!resolved.isFallback && resolved.webmUrl) {
+        if (
+          !resolved.isFallback &&
+          resolved.webmUrl &&
+          resolved.webmUrl !== streamEntry.webmUrl
+        ) {
           await mountOgvStream(
             resolved.webmUrl,
             resolved.audioUrl,
             resolved.instanceName,
             resolved.codecLabel,
             sessionId,
-            true
+            streamEntry.webmUrl
           );
         } else {
+          setActiveInstanceName(
+            `youtube.com/watch?v=${videoId} • ${resolved.instanceName}`
+          );
           setStatusText(
-            `Ativo via ogv.js WASM no <canvas> + <audio> (${resolved.instanceName})`
+            `Reproduzindo YouTube (${videoId}) no <canvas> + <audio> via WASM Worker`
           );
         }
       },
@@ -397,12 +410,12 @@ export const ExternalModeCanvasPlayer = forwardRef<
 
     return (
       <div className="canvas-mode-stage" id="external-mode-canvas-stage">
-        {/* Top Overlay Diagnostics & Piped/Invidious Selector */}
+        {/* Top Overlay Diagnostics & Invidious/Piped CORS Selector */}
         <div className="canvas-mode-stage__hud">
           <div className="canvas-mode-stage__badges">
             <span className="canvas-mode-badge canvas-mode-badge--external">
               <Globe size={12} />
-              <span>EXTERNAL MODE • Piped/Invidious + ogv.js WASM</span>
+              <span>EXTERNAL MODE • Invidious/Piped CORS + WASM Worker</span>
             </span>
             <span className="canvas-mode-badge">{codecBadge}</span>
             <span className="canvas-mode-badge">
@@ -414,7 +427,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
             <label
               htmlFor="select-cors-instance"
               className="canvas-hud-select-wrap"
-              title="Selecionar instância pública Piped / Invidious CORS"
+              title="Selecionar instância pública Invidious (?local=true) / Piped CORS"
             >
               <Server size={12} />
               <select
@@ -442,7 +455,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
                 showLogsDrawer ? 'canvas-hud-btn--active' : ''
               }`}
               onClick={() => setShowLogsDrawer((v) => !v)}
-              title="Exibir log de resolução CORS das APIs Piped/Invidious e configurar endpoint customizado"
+              title="Exibir log de resolução CORS das APIs Invidious/Piped"
             >
               <Terminal size={12} />
               <span>API / Logs</span>
@@ -455,7 +468,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
               onClick={() =>
                 resolveAndPlayExternal(selectedInstanceId, customEndpointInput)
               }
-              title="Reconectar às APIs Piped / Invidious CORS"
+              title="Reconectar às APIs Invidious / Piped CORS"
             >
               <RefreshCw size={12} />
               <span>Reconectar</span>
@@ -476,7 +489,7 @@ export const ExternalModeCanvasPlayer = forwardRef<
                 type="text"
                 value={customEndpointInput}
                 onChange={(e) => setCustomEndpointInput(e.target.value)}
-                placeholder="URL de instância Piped/Invidious ou stream .webm direto (CORS)"
+                placeholder="URL de instância Invidious/Piped customizada (CORS)"
                 className="canvas-mode-stage__url-input"
               />
               <button

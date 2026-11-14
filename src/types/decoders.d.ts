@@ -44,6 +44,10 @@ declare module 'tinyh264/es/TinyH264Decoder' {
   }
 }
 
+declare module 'tinyh264/es/TinyH264Worker' {
+  export function init(): Promise<void>;
+}
+
 interface OGVPlayerElement extends HTMLElement {
   src: string;
   autoplay: boolean;
